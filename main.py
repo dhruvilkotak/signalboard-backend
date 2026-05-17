@@ -2,18 +2,20 @@
 Signal Board — FastAPI Backend
 Runs on Oracle Cloud ARM / GCP e2-micro (free, always-on)
 """
+from dotenv import load_dotenv
+load_dotenv()
+
 import os, json, asyncio, logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
+
 
 from routers import prices, news, signals, trader, alerts, chat
 from services.price_service import PriceService
 from services.news_service import NewsService
 
-load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
