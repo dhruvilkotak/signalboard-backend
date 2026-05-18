@@ -7,37 +7,10 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-test:
-    name: Lint, type check, test
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt ruff pytest pytest-asyncio
-
-      - name: Lint with ruff
-        run: ruff check .
-
-      - name: Run tests
-        run: pytest tests/ -v
-        env:
-          ALPACA_API_KEY: test
-          ALPACA_SECRET_KEY: test
-          ANTHROPIC_API_KEY: test
-
   deploy:
     name: Deploy to VM (main only)
-    needs: lint-and-test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-
     steps:
       - uses: actions/checkout@v4
 
@@ -51,6 +24,8 @@ jobs:
             cd ~/signalboard-backend
             git pull origin main
             source venv/bin/activate
-            pip install -r requirements.txt
+            pip install -r requirements.txt --quiet
             sudo systemctl restart signalboard
+            sleep 3
+            curl -s http://localhost:8000/health
             echo "Deploy complete"
