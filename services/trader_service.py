@@ -11,6 +11,7 @@ from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 logger = logging.getLogger(__name__)
 BUDGET = float(os.getenv("PAPER_BUDGET", "100.0"))
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "5.0"))  # sell if down ≥ this %
 
 class TraderService:
     def __init__(self):
@@ -21,6 +22,7 @@ class TraderService:
         )
         self.budget = BUDGET
         self._trade_log: list = []
+        self._value_history: list = []
 
     def get_account(self) -> dict:
         try:
@@ -126,6 +128,59 @@ class TraderService:
         except Exception as e:
             logger.error(f"Trade execution error: {e}")
             return {"status": "error", "reason": str(e)}
+
+    def check_stop_losses(self) -> list:
+        """Auto-sell any position whose unrealized loss exceeds STOP_LOSS_PCT."""
+        triggered = []
+        try:
+            positions = self.get_positions()
+            for pos in positions:
+                if pos["unrealized_pnl_pct"] <= -STOP_LOSS_PCT:
+                    symbol = pos["symbol"]
+                    order = self.client.submit_order(MarketOrderRequest(
+                        symbol=symbol,
+                        qty=pos["qty"],
+                        side=OrderSide.SELL,
+                        time_in_force=TimeInForce.DAY,
+                    ))
+                    trade = {
+                        "status": "executed",
+                        "action": "SELL",
+                        "reason": "stop_loss",
+                        "symbol": symbol,
+                        "qty": pos["qty"],
+                        "price": pos["current_price"],
+                        "pnl": pos["unrealized_pnl"],
+                        "pnl_pct": pos["unrealized_pnl_pct"],
+                        "order_id": str(order.id),
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "signal_reason": f"Stop-loss triggered at {pos['unrealized_pnl_pct']:.1f}%",
+                    }
+                    self._trade_log.append(trade)
+                    triggered.append(trade)
+                    logger.warning("Stop-loss triggered for %s: %.1f%%", symbol, pos["unrealized_pnl_pct"])
+        except Exception as e:
+            logger.error("Stop-loss check error: %s", e)
+        return triggered
+
+    def record_snapshot(self) -> None:
+        """Append a portfolio value snapshot for the performance chart."""
+        account = self.get_account()
+        if not account:
+            return
+        self._value_history.append({
+            "timestamp": datetime.utcnow().isoformat(),
+            "value": account.get("portfolio_value", BUDGET),
+            "pnl": account.get("pnl", 0),
+            "pnl_pct": account.get("pnl_pct", 0),
+            "cash": account.get("cash", 0),
+        })
+        # Keep ~24 h of 1-min snapshots
+        if len(self._value_history) > 1440:
+            self._value_history = self._value_history[-1440:]
+
+    def get_performance_chart(self) -> list:
+        return self._value_history
 
     def get_trade_log(self) -> list:
         return list(reversed(self._trade_log))

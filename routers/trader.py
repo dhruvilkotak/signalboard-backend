@@ -28,6 +28,11 @@ def get_positions():
 def get_performance():
     return _trader_svc.get_performance()
 
+@router.post("/stop-loss/check")
+def trigger_stop_loss_check():
+    """Manually run the stop-loss sweep and return any triggered sells."""
+    return _trader_svc.check_stop_losses()
+
 @router.get("/trades")
 def get_trade_log():
     return _trader_svc.get_trade_log()
