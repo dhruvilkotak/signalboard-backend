@@ -21,11 +21,13 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
-            cd ~/signalboard-backend
-            git pull origin main
-            source venv/bin/activate
+            export HOME=/home/kotakdhruvil
+            cd /home/kotakdhruvil/signalboard-backend
+            git fetch origin
+            git reset --hard origin/main
+            source /home/kotakdhruvil/signalboard-backend/venv/bin/activate
             pip install -r requirements.txt --quiet
             sudo systemctl restart signalboard
             sleep 3
             curl -s http://localhost:8000/health
-            echo "Deploy complete"
+            echo "Deploy complete - $(git log --oneline -1)"
