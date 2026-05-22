@@ -1,6 +1,6 @@
 # signalboard-backend
 
-FastAPI backend for Signal // Board — AI stock signal dashboard.
+FastAPI backend for Signal Board — AI stock signal dashboard.
 
 **Companion repo:** [signalboard-frontend](https://github.com/YOUR_USERNAME/signalboard-frontend)
 
