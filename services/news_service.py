@@ -4,7 +4,7 @@ Refreshes every 15 minutes via scheduler
 """
 import os, logging
 from datetime import datetime, timedelta, timezone
-from alpaca.data import StockNewsClient
+from alpaca.data.historical.news import NewsClient
 from alpaca.data.requests import NewsRequest
 
 logger = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ def get_tickers():
 
 class NewsService:
     def __init__(self):
-        self.client = StockNewsClient(
+        self.client = NewsClient(
             api_key=os.getenv("ALPACA_API_KEY"),
             secret_key=os.getenv("ALPACA_SECRET_KEY"),
         )
