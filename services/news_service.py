@@ -41,7 +41,7 @@ class NewsService:
                         limit=10,
                     )
                     news = self.client.get_news(request)
-                    for article in (news.news or []):
+                    for article in (news or []):
                         grouped[symbol].append({
                             "id":         str(article.id),
                             "headline":   article.headline,
