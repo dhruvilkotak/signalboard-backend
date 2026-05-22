@@ -239,7 +239,7 @@ app.add_middleware(
 )
 
 # Inject services into routers
-from routers import prices, news, signals, trader, alerts, chat, quote
+from routers import prices, news, signals, trader, alerts, chat, quote, watchlist
 
 signals.signal_svc = signal_svc
 signals.price_svc  = price_svc
@@ -251,13 +251,14 @@ chat.news_svc      = news_svc
 prices.price_svc   = price_svc
 news.news_svc      = news_svc
 
-app.include_router(prices.router,  prefix="/api/prices",  tags=["prices"])
-app.include_router(news.router,    prefix="/api/news",    tags=["news"])
-app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
-app.include_router(trader.router,  prefix="/api/trader",  tags=["trader"])
-app.include_router(alerts.router,  prefix="/api/alerts",  tags=["alerts"])
-app.include_router(chat.router,    prefix="/api/chat",    tags=["chat"])
-app.include_router(quote.router,   prefix="/api/quote",   tags=["quote"])
+app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
+app.include_router(news.router,      prefix="/api/news",      tags=["news"])
+app.include_router(signals.router,   prefix="/api/signals",   tags=["signals"])
+app.include_router(trader.router,    prefix="/api/trader",    tags=["trader"])
+app.include_router(alerts.router,    prefix="/api/alerts",    tags=["alerts"])
+app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"])
+app.include_router(quote.router,     prefix="/api/quote",     tags=["quote"])
+app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])
 
 @app.get("/api/market", tags=["market"])
 async def get_market_context():
