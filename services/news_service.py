@@ -41,7 +41,10 @@ class NewsService:
                         limit=10,
                     )
                     news = self.client.get_news(request)
-                    for _, article in news:
+
+                    for item in news:
+                        article = item[1] if isinstance(item, tuple) else item
+
                         grouped[symbol].append({
                             "id":         str(article.id),
                             "headline":   article.headline,

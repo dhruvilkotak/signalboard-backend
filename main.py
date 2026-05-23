@@ -11,6 +11,8 @@ Each session uses different signal logic:
 - Market:      full technical + sentiment analysis
 - Post-market: focus on earnings results, after-hours price moves
 """
+from services.firebase_service import init_firebase
+
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -163,6 +165,12 @@ async def price_refresh_job():
 async def lifespan(app: FastAPI):
     logger.info("Starting Signal Board v2.1...")
 
+    firebase_ok = init_firebase()
+    if firebase_ok:
+        logger.info("Firestore ready ✓")
+    else:
+        logger.warning("Running WITHOUT Firebase — watchlist/auth disabled")
+ 
     # Price refresh every 30s (all hours)
     scheduler.add_job(
         price_refresh_job, "interval",
