@@ -237,7 +237,7 @@ async def lifespan(app: FastAPI):
     logger.info("Signal Board stopped.")
 
 # ── App ───────────────────────────────────────────────────────────────────────
-app = FastAPI(title="Signal Board API", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="Signal Board API", version="2.1.0", lifespan=lifespan, redirect_slashes=False)
 
 app.add_middleware(
     CORSMiddleware,
