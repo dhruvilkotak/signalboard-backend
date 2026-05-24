@@ -258,6 +258,7 @@ chat.price_svc     = price_svc
 chat.news_svc      = news_svc
 prices.price_svc   = price_svc
 news.news_svc      = news_svc
+search.price_svc = price_svc
 
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
