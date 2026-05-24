@@ -168,6 +168,8 @@ async def lifespan(app: FastAPI):
     firebase_ok = init_firebase()
     if firebase_ok:
         logger.info("Firestore ready ✓")
+        from services.firebase_service import get_db
+        signal_svc.set_db(get_db())   # wire Firestore into signal service
     else:
         logger.warning("Running WITHOUT Firebase — watchlist/auth disabled")
  
