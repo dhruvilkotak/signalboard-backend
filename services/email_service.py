@@ -165,3 +165,80 @@ If you think this was a mistake, please contact {GMAIL_USER}.
         html,
         text,
     )
+
+
+async def send_invite_email(to_email: str, code: str, notes: str = "") -> bool:
+    """Send invite code email to new user."""
+    signup_url = f"{APP_URL}?invite={code}"
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+  <div style="max-width:520px;margin:40px auto;padding:0 16px">
+
+    <div style="text-align:center;margin-bottom:32px">
+      <h1 style="color:#e6edf3;font-size:24px;font-weight:700;margin:0;letter-spacing:-0.5px">SignalBoard</h1>
+      <p style="color:#8b949e;font-size:13px;margin:4px 0 0">AI Stock Signals</p>
+    </div>
+
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px">
+      <div style="text-align:center;font-size:48px;margin-bottom:16px">🎯</div>
+      <h2 style="color:#e6edf3;font-size:20px;font-weight:700;text-align:center;margin:0 0 16px">
+        You've been invited to SignalBoard!
+      </h2>
+      <p style="color:#8b949e;font-size:14px;line-height:1.6;margin:0 0 24px;text-align:center">
+        You've received an invitation to join SignalBoard — an AI-powered stock signal
+        platform with autonomous paper trading.
+      </p>
+
+      <div style="text-align:center;margin:24px 0">
+        <a href="{APP_URL}"
+           style="display:inline-block;background:#238636;color:#ffffff;text-decoration:none;
+                  padding:12px 32px;border-radius:6px;font-size:15px;font-weight:600;
+                  border:1px solid #2ea043">
+          Request Access →
+        </a>
+      </div>
+
+      <hr style="border:none;border-top:1px solid #30363d;margin:24px 0">
+
+      <p style="color:#8b949e;font-size:13px;margin:0 0 8px;text-align:center">
+        When signing up, use this email address:
+      </p>
+      <div style="background:#0d1117;border:1px solid #30363d;border-radius:6px;padding:12px;text-align:center;margin-bottom:16px">
+        <code style="color:#79c0ff;font-size:16px;font-family:monospace">{to_email}</code>
+      </div>
+
+      <hr style="border:none;border-top:1px solid #30363d;margin:24px 0">
+
+      <p style="color:#6e7681;font-size:12px;text-align:center;margin:0;line-height:1.6">
+        ⚠️ SignalBoard uses paper trading only — no real money involved.<br>
+        Signals are for educational purposes and not financial advice.
+      </p>
+    </div>
+
+    <p style="color:#6e7681;font-size:11px;text-align:center;margin:24px 0 0;line-height:1.6">
+      This invitation was sent by SignalBoard admin.<br>
+      Questions? Contact <a href="mailto:{GMAIL_USER}" style="color:#58a6ff">{GMAIL_USER}</a>
+    </p>
+  </div>
+</body>
+</html>"""
+
+    text = f"""You've been invited to SignalBoard! 🎯
+
+SignalBoard is an AI-powered stock signal platform with autonomous paper trading.
+
+To sign up, visit: {APP_URL}
+Use this email address when signing up: {to_email}
+
+Questions? Contact {GMAIL_USER}
+"""
+
+    return _send_email(
+        to_email,
+        "You're invited to SignalBoard 🎯",
+        html,
+        text,
+    )

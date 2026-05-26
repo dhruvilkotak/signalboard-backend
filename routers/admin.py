@@ -90,3 +90,50 @@ async def get_pending_users(admin=Depends(require_admin)):
         return {"users": users}
     except Exception as e:
         raise HTTPException(500, f"Failed to fetch users: {e}")
+
+
+import random
+import string
+from datetime import datetime, timedelta, timezone
+
+def generate_code():
+    chars = string.ascii_uppercase.replace("O","").replace("I","") + "23456789"
+    return "SB-" + "".join(random.choices(chars, k=5))
+
+
+class InviteRequest(BaseModel):
+    email: str
+    notes: str = ""
+
+
+@router.post("/invite")
+async def send_invite(req: InviteRequest, admin=Depends(require_admin)):
+    """Generate invite code, store in Firestore, send email."""
+    from services.email_service import send_invite_email
+    db = get_db()
+    if not db:
+        raise HTTPException(500, "Database not available")
+
+    code    = generate_code()
+    expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+
+    try:
+        db.collection("invites").document(code).set({
+            "email":      req.email.strip().lower(),
+            "used":       False,
+            "created_at": __import__("firebase_admin").firestore.SERVER_TIMESTAMP,
+            "expires_at": expires,
+            "notes":      req.notes,
+            "created_by": admin["uid"],
+        })
+    except Exception as e:
+        raise HTTPException(500, f"Failed to store invite: {e}")
+
+    email_sent = await send_invite_email(req.email, code, req.notes)
+
+    return {
+        "success":    True,
+        "code":       code,
+        "email_sent": email_sent,
+        "message":    f"Invite {code} created. Email {'sent' if email_sent else 'failed'} to {req.email}.",
+    }
