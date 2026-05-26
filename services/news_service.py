@@ -27,33 +27,48 @@ class NewsService:
         """Called every 15 min by scheduler"""
         try:
             tickers = get_tickers()
-            since = datetime.now(timezone.utc) - timedelta(hours=8)
-
-            # Alpaca NewsRequest requires symbols as comma-separated string
-            # or fetch per symbol if list causes issues
-            grouped: dict = {t: [] for t in tickers}
+            since   = datetime.now(timezone.utc) - timedelta(hours=8)
+            grouped = {t: [] for t in tickers}
 
             for symbol in tickers:
                 try:
                     request = NewsRequest(
-                        symbols=symbol,   # single symbol string — avoids list validation error
+                        symbols=symbol,
                         start=since,
                         limit=10,
                     )
                     news = self.client.get_news(request)
 
-                    for item in news:
-                        article = item[1] if isinstance(item, tuple) else item
+                    # NewsClient returns NewsSet — iterate .data dict values
+                    articles = []
+                    if hasattr(news, "data"):
+                        # data is dict: { "news": [NewsArticle, ...] }
+                        for key, val in news.data.items():
+                            if isinstance(val, list):
+                                articles.extend(val)
+                    elif hasattr(news, "__iter__"):
+                        for item in news:
+                            # Could be tuple (symbol, article) or just article
+                            if isinstance(item, tuple):
+                                articles.append(item[-1])
+                            else:
+                                articles.append(item)
 
-                        grouped[symbol].append({
-                            "id":         str(article.id),
-                            "headline":   article.headline,
-                            "summary":    article.summary or "",
-                            "url":        article.url,
-                            "source":     article.source,
-                            "created_at": article.created_at.isoformat(),
-                            "symbols":    article.symbols or [symbol],
-                        })
+                    for article in articles:
+                        try:
+                            grouped[symbol].append({
+                                "id":         str(getattr(article, "id", "")),
+                                "headline":   getattr(article, "headline", ""),
+                                "summary":    getattr(article, "summary", "") or "",
+                                "url":        getattr(article, "url", ""),
+                                "source":     getattr(article, "source", ""),
+                                "created_at": getattr(article, "created_at", datetime.now(timezone.utc)).isoformat(),
+                                "symbols":    getattr(article, "symbols", [symbol]) or [symbol],
+                            })
+                        except Exception as e:
+                            logger.warning(f"Article parse error for {symbol}: {e}")
+                            continue
+
                 except Exception as e:
                     logger.warning(f"News fetch failed for {symbol}: {e}")
                     continue
