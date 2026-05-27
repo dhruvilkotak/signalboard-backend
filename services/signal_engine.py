@@ -223,11 +223,20 @@ class SignalEngine:
                         xml = xml_res.text
 
                         def _extract(tag: str) -> Optional[str]:
-                            m = re.search(rf"<{tag}[^>]*>([^<]+)</{tag}>", xml)
+                            """Extract value from nested <tag><value>X</value></tag> or <tag>X</tag>."""
+                            # Try nested <value> first (standard Form 4 XML)
+                            m = re.search(rf"<{tag}[^>]*>\\s*<value>([^<]+)</value>", xml)
+                            if m:
+                                return m.group(1).strip()
+                            # Fallback: direct content
+                            m = re.search(rf"<{tag}[^>]*>([^<
+]+)</{tag}>", xml)
                             return m.group(1).strip() if m else None
 
-                        # Transaction code: P=Purchase S=Sale A=Award D=Disposition F=Tax M=Option G=Gift
-                        trans_code = _extract("transactionCode") or "U"
+                        # Transaction code is direct (no nested <value>)
+                        trans_code = re.search(r"<transactionCode>([^<]+)</transactionCode>", xml)
+                        trans_code = trans_code.group(1).strip() if trans_code else "U"
+
                         shares_str = _extract("transactionShares")
                         price_str  = _extract("transactionPricePerShare")
                         role       = _extract("officerTitle") or "Insider"
@@ -236,11 +245,14 @@ class SignalEngine:
                         price  = float(price_str)  if price_str  else None
                         total  = round(shares * price, 2) if shares and price else None
 
+                        # Rule 10b5-1 plan = pre-scheduled, uninformative sale
+                        is_10b5 = "<aff10b5One>true</aff10b5One>" in xml or "<aff10b5Two>true</aff10b5Two>" in xml
+
                         type_map = {
                             "P": "Purchase",
-                            "S": "Sale",
+                            "S": "Sale (10b5-1)" if is_10b5 else "Sale",
                             "A": "Award",
-                            "D": "Disposition",
+                            "D": "Disposal",
                             "F": "Tax withholding",
                             "M": "Option exercise",
                             "G": "Gift",
@@ -255,6 +267,7 @@ class SignalEngine:
                             "shares":      shares,
                             "price":       price,
                             "total_value": total,
+                            "is_10b5":     is_10b5,
                             "form":        "4",
                         }
                     except Exception as e:
