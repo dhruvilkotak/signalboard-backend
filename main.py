@@ -33,7 +33,8 @@ from services.signal_service import SignalService
 from services.trader_service import TraderService
 from services.technical_service import TechnicalService
 from services.market_service import MarketService
-from services.ticker_service import TickerService          # #32
+from services.ticker_service import TickerService    
+from services.ondemand_signal_service import OnDemandSignalService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,7 +49,8 @@ tech_svc   = TechnicalService()
 market_svc = MarketService()
 signal_svc = SignalService(price_svc, news_svc, tech_svc, market_svc)
 trader_svc = TraderService()
-ticker_svc = TickerService()                               # #32
+ticker_svc = TickerService()                             
+ondemand_svc = OnDemandSignalService(price_svc, news_svc)
 scheduler  = AsyncIOScheduler(timezone="America/New_York")
 
 # ── Trading session definitions ───────────────────────────────────────────────
@@ -217,6 +219,7 @@ async def lifespan(app: FastAPI):
         db = get_db()
         signal_svc.set_db(db)                              # existing
         ticker_svc.set_db(db)                              # #32
+        ondemand_svc.set_db(db)
     else:
         logger.warning("Running WITHOUT Firebase — watchlist/auth/tickers disabled")
 
@@ -302,7 +305,7 @@ app.add_middleware(
 )
 
 # Inject services into routers
-from routers import prices, news, signals, trader, alerts, chat, quote, watchlist, search, admin
+from routers import prices, news, signals, trader, alerts, chat, quote, watchlist, search, admin, ondemand
 
 signals.signal_svc = signal_svc
 signals.price_svc  = price_svc
@@ -314,6 +317,7 @@ chat.news_svc      = news_svc
 prices.price_svc   = price_svc
 news.news_svc      = news_svc
 search.price_svc   = price_svc
+ondemand.ondemand_svc = ondemand_svc
 
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
@@ -325,6 +329,7 @@ app.include_router(quote.router,     prefix="/api/quote",     tags=["quote"])
 app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])
 app.include_router(search.router,    prefix="/api/search",    tags=["search"])
 app.include_router(admin.router,     prefix="/api/admin",     tags=["admin"])
+app.include_router(ondemand.router, prefix="/api/ondemand", tags=["ondemand"])
 
 @app.get("/api/market", tags=["market"])
 async def get_market_context():
