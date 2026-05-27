@@ -5,30 +5,20 @@ Shared signal generation engine used by BOTH:
   - signal_service.py      (scheduler, auto-trader, feed)
   - ondemand_signal_service.py (Live Prices Signal tab)
 
-Guarantees identical data sources and Claude prompt → consistent signals.
-
 Data sources:
-  1. Yahoo Finance price (via price_service cache or direct fetch)
-  2. TechnicalService    (real RSI/MACD/SMA/volume — not the stub)
-  3. NewsService         (recent headlines)
-  4. SEC EDGAR Form 4    (insider transactions: type, shares, price, value, role)
-  5. StockTwits          (retail sentiment: bullish/bearish ratio, volume)
+  1. Yahoo Finance price
+  2. TechnicalService (real RSI/MACD/SMA/volume)
+  3. NewsService (recent headlines)
+  4. SEC EDGAR Form 4 (insider transactions: type, shares, price, value, role)
+  5. StockTwits (retail sentiment)
 
-Output schema (what Claude returns + metadata added by engine):
-  signal, confidence, target_price, stop_loss, expected_return_pct,
-  timeframe, timeframe_days, summary, risk, key_factors,
-  insider_summary, sentiment_summary, price_targets {week1,week2,month1,month3},
-  bull_case, bear_case, conviction_score (1-10)
-
-Feed eligibility (set by engine, not by caller):
-  feed_eligible = signal in (BUY, SELL)
-                  AND confidence in (HIGH, MEDIUM)
-                  AND trigger != fallback
+Feed eligibility: signal in (BUY,SELL) AND confidence == HIGH AND trigger != fallback
 """
 
 import json
 import logging
 import asyncio
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -48,21 +38,9 @@ class SignalEngine:
         self.tech_svc  = technical_service
         self.client    = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    async def generate(
-        self,
-        symbol:  str,
-        session: str = "market",
-        trigger: str = "scheduled",
-    ) -> dict:
-        """
-        Fetch all data sources concurrently, call Claude, return enriched signal.
-        This is the single source of truth for signal generation.
-        """
+    async def generate(self, symbol: str, session: str = "market", trigger: str = "scheduled") -> dict:
         symbol = symbol.upper().strip()
         async with _semaphore:
-            # Fetch all data sources concurrently
             price_data, news_items, tech_data, insider_trades, sentiment = await asyncio.gather(
                 self._fetch_price(symbol),
                 self._fetch_news(symbol),
@@ -72,7 +50,6 @@ class SignalEngine:
                 return_exceptions=True,
             )
 
-            # Sanitise gather exceptions
             if isinstance(price_data,     Exception): price_data     = {}
             if isinstance(news_items,     Exception): news_items     = []
             if isinstance(tech_data,      Exception): tech_data      = {}
@@ -94,15 +71,14 @@ class SignalEngine:
 
             now = datetime.now(timezone.utc)
             signal.update({
-                "symbol":           symbol,
-                "price_at_signal":  price_data.get("price", 0),
-                "generated_at":     now.isoformat(),
-                "session":          session,
-                "trigger":          trigger,
-                "insider_trades":   insider_trades,
-                "sentiment":        sentiment,
-                # Feed eligibility filter
-                "feed_eligible":    (
+                "symbol":          symbol,
+                "price_at_signal": price_data.get("price", 0),
+                "generated_at":    now.isoformat(),
+                "session":         session,
+                "trigger":         trigger,
+                "insider_trades":  insider_trades,
+                "sentiment":       sentiment,
+                "feed_eligible":   (
                     signal.get("signal") in ("BUY", "SELL") and
                     signal.get("confidence") == "HIGH" and
                     trigger != "fallback"
@@ -158,13 +134,19 @@ class SignalEngine:
 
     async def _fetch_insider_trades(self, symbol: str) -> list[dict]:
         """
-        SEC EDGAR Form 4 — parse XML for transaction type, shares, price, value, role.
-        Returns list of enriched insider transactions.
+        SEC EDGAR Form 4 — fetch filing index then parse XML for transaction details.
+
+        Correct URL pattern:
+          Search:  efts.sec.gov/LATEST/search-index?q="SYMBOL"&forms=4
+          XML:     sec.gov/Archives/edgar/data/{CIK}/{accession_nodash}/{filename}
+
+        The _id field in search results is "{accession}:{filename}" — use both parts.
+        Company CIK is ciks[1] (index 1), insider CIK is ciks[0].
         """
         trades = []
         try:
             async with httpx.AsyncClient(timeout=12) as c:
-                # Step 1: find recent Form 4 filings for this ticker
+                # Step 1: search for Form 4 filings
                 search_res = await c.get(
                     "https://efts.sec.gov/LATEST/search-index",
                     params={
@@ -181,43 +163,53 @@ class SignalEngine:
 
                 hits = search_res.json().get("hits", {}).get("hits", [])[:8]
 
-                # Step 2: fetch each filing's XML to extract transaction details
                 async def _parse_filing(hit: dict) -> Optional[dict]:
                     try:
-                        src        = hit.get("_source", {})
-                        accession  = src.get("accession_no", "").replace("-", "")
-                        cik        = src.get("file_num", "") or ""
-                        entity_id  = src.get("entity_id", "")
-                        file_date  = src.get("file_date", "")
+                        src          = hit.get("_source", {})
+                        hit_id       = hit.get("_id", "")        # e.g. "0001140361-26-020871:form4.xml"
+                        file_date    = src.get("file_date", "")
                         display_names = src.get("display_names", [])
-                        filer_name = display_names[0] if display_names else "Unknown"
+                        ciks         = src.get("ciks", [])
 
-                        # Get filing index to find the XML document
-                        if not accession or not entity_id:
-                            return {
-                                "name":        filer_name,
-                                "role":        "Insider",
-                                "date":        file_date,
-                                "type":        "Unknown",
-                                "type_code":   "U",
-                                "shares":      None,
-                                "price":       None,
-                                "total_value": None,
-                                "form":        "4",
-                            }
+                        # Insider is ciks[0], company is ciks[1]
+                        insider_cik  = ciks[0] if ciks else ""
+                        company_cik  = ciks[1] if len(ciks) > 1 else (ciks[0] if ciks else "")
 
-                        idx_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={entity_id}&type=4&dateb=&owner=include&count=5&search_text="
-                        filing_url = f"https://www.sec.gov/Archives/edgar/data/{entity_id}/{accession}/form4.xml"
+                        # Insider name — first display_name that matches insider_cik
+                        insider_name = "Unknown"
+                        for dn in display_names:
+                            if insider_cik and insider_cik.lstrip("0") in dn:
+                                insider_name = dn.split("(CIK")[0].strip()
+                                break
+                        if insider_name == "Unknown" and display_names:
+                            insider_name = display_names[0].split("(CIK")[0].strip()
+
+                        # Build XML URL from _id: "{accession}:{filename}"
+                        if ":" in hit_id:
+                            accession_raw, filename = hit_id.split(":", 1)
+                        else:
+                            return None
+
+                        # Remove dashes from accession for URL path
+                        accession_nodash = accession_raw.replace("-", "")
+                        # Strip leading zeros from company CIK for URL
+                        company_cik_int  = str(int(company_cik)) if company_cik else ""
+
+                        xml_url = (
+                            f"https://www.sec.gov/Archives/edgar/data/"
+                            f"{company_cik_int}/{accession_nodash}/{filename}"
+                        )
 
                         xml_res = await c.get(
-                            filing_url,
+                            xml_url,
                             headers={"User-Agent": "SignalBoard research@signalboard.app"},
                             follow_redirects=True,
                         )
 
                         if not xml_res.is_success:
+                            # Return metadata-only entry (no transaction details)
                             return {
-                                "name":        filer_name,
+                                "name":        insider_name,
                                 "role":        "Insider",
                                 "date":        file_date,
                                 "type":        "Unknown",
@@ -230,17 +222,15 @@ class SignalEngine:
 
                         xml = xml_res.text
 
-                        # Parse key fields from Form 4 XML
                         def _extract(tag: str) -> Optional[str]:
-                            import re
                             m = re.search(rf"<{tag}[^>]*>([^<]+)</{tag}>", xml)
                             return m.group(1).strip() if m else None
 
-                        # Transaction type: P=Purchase, S=Sale, A=Award, D=Disposition
-                        trans_code  = _extract("transactionCode") or "U"
-                        shares_str  = _extract("transactionShares")
-                        price_str   = _extract("transactionPricePerShare")
-                        role        = _extract("officerTitle") or _extract("reportingOwnerRelationship") or "Insider"
+                        # Transaction code: P=Purchase S=Sale A=Award D=Disposition F=Tax M=Option G=Gift
+                        trans_code = _extract("transactionCode") or "U"
+                        shares_str = _extract("transactionShares")
+                        price_str  = _extract("transactionPricePerShare")
+                        role       = _extract("officerTitle") or "Insider"
 
                         shares = float(shares_str) if shares_str else None
                         price  = float(price_str)  if price_str  else None
@@ -257,7 +247,7 @@ class SignalEngine:
                         }
 
                         return {
-                            "name":        filer_name,
+                            "name":        insider_name,
                             "role":        role.title() if role else "Insider",
                             "date":        file_date,
                             "type":        type_map.get(trans_code, f"Code {trans_code}"),
@@ -288,15 +278,27 @@ class SignalEngine:
                 )
                 if not res.is_success:
                     return {}
+
                 data     = res.json()
                 sym_data = data.get("symbol", {})
                 messages = data.get("messages", [])
-                bull     = sum(1 for m in messages if m.get("entities", {}).get("sentiment", {}).get("basic") == "Bullish")
-                bear     = sum(1 for m in messages if m.get("entities", {}).get("sentiment", {}).get("basic") == "Bearish")
+
+                # Sentiment is at entities.sentiment.basic (not top-level)
+                bull = sum(
+                    1 for m in messages
+                    if m.get("entities", {}).get("sentiment", {}) and
+                    m.get("entities", {}).get("sentiment", {}).get("basic") == "Bullish"
+                )
+                bear = sum(
+                    1 for m in messages
+                    if m.get("entities", {}).get("sentiment", {}) and
+                    m.get("entities", {}).get("sentiment", {}).get("basic") == "Bearish"
+                )
                 total    = bull + bear
                 bull_pct = round(bull / total * 100) if total > 0 else 50
                 bear_pct = 100 - bull_pct
                 label    = "Bullish" if bull_pct >= 60 else "Bearish" if bear_pct >= 60 else "Mixed"
+
                 return {
                     "bullish_pct":     bull_pct,
                     "bearish_pct":     bear_pct,
@@ -310,13 +312,10 @@ class SignalEngine:
 
     # ── Claude ────────────────────────────────────────────────────────────────
 
-    async def _call_claude(
-        self, symbol, price, tech, headlines, insider_trades, sentiment, session
-    ) -> dict:
+    async def _call_claude(self, symbol, price, tech, headlines, insider_trades, sentiment, session) -> dict:
 
-        # Price section
         price_text = (
-            f"Current: ${price.get('price', 0):.2f} "
+            f"${price.get('price', 0):.2f} "
             f"({price.get('change_pct', 0):+.2f}% today)\n"
             f"Open: ${price.get('open', 0):.2f}  "
             f"High: ${price.get('high', 0):.2f}  "
@@ -324,7 +323,6 @@ class SignalEngine:
             f"Volume: {price.get('volume', 0):,.0f}"
         )
 
-        # Technical section
         if tech.get("rsi") is not None:
             tech_text = (
                 f"RSI(14): {tech['rsi']} [{tech.get('rsi_signal','?')}]\n"
@@ -340,15 +338,13 @@ class SignalEngine:
                 f"Trend: {tech.get('trend', 'NEUTRAL')}"
             )
         else:
-            tech_text = "Technical data unavailable for this symbol."
+            tech_text = "Technical data unavailable."
 
-        # News section
         news_text = (
             "\n".join(f"- {h}" for h in headlines)
             if headlines else "- No recent news available"
         )
 
-        # Insider section
         if insider_trades:
             insider_lines = []
             for t in insider_trades:
@@ -363,8 +359,7 @@ class SignalEngine:
         else:
             insider_text = "No insider filings in last 90 days."
 
-        # Sentiment section
-        if sentiment:
+        if sentiment and sentiment.get("message_volume", 0) > 0:
             sentiment_text = (
                 f"StockTwits: {sentiment.get('sentiment_label','?')} — "
                 f"{sentiment.get('bullish_pct', 50)}% bullish / "
@@ -373,14 +368,13 @@ class SignalEngine:
                 f"{sentiment.get('watchlist_count', 0):,} watching)"
             )
         else:
-            sentiment_text = "Sentiment data unavailable."
+            sentiment_text = "Retail sentiment data unavailable."
 
-        # Session context
         session_instructions = {
-            "pre_market":  "PRE-MARKET: Focus on overnight catalysts, futures, earnings. Be more conservative — thin liquidity. Prefer MEDIUM confidence unless clear catalyst.",
-            "market":      "MARKET HOURS: Full liquidity. All signals can be acted on immediately. HIGH confidence signals may be auto-traded.",
-            "post_market": "POST-MARKET: Focus on earnings results and after-hours moves. Signal is for NEXT DAY preparation.",
-            "closed":      "MARKET CLOSED: Provide forward-looking analysis for next session. Do NOT default to HOLD just because market is closed — if the data supports BUY or SELL, say so.",
+            "pre_market":  "PRE-MARKET: Focus on overnight catalysts, futures, earnings. Be conservative — thin liquidity.",
+            "market":      "MARKET HOURS: Full liquidity. HIGH confidence signals may be auto-traded.",
+            "post_market": "POST-MARKET: Focus on earnings results. Signal is for NEXT DAY preparation.",
+            "closed":      "MARKET CLOSED: Provide forward-looking analysis. Do NOT default to HOLD — if data supports BUY or SELL, say so.",
         }
         session_ctx = session_instructions.get(session, session_instructions["market"])
 
@@ -404,16 +398,14 @@ SEC INSIDER ACTIVITY (Form 4 — last 90 days):
 RETAIL SENTIMENT:
 {sentiment_text}
 
-ANALYSIS INSTRUCTIONS:
-- Synthesise ALL data sources — do not anchor on any single indicator
-- RSI >70 = overbought (lean SELL), RSI <30 = oversold (lean BUY), RSI 45-55 = genuinely neutral
-- Insider PURCHASES are strongly bullish; insider SALES are mixed (may be routine)
-- MACD bullish crossover + above SMA20 + positive momentum = strong BUY signal
-- High StockTwits bullish % (>70%) can be contrarian if stock already run up
-- If market is closed but data clearly supports directional conviction, give BUY or SELL
-- conviction_score: 1-10 reflecting overall signal strength (7+ = feed-worthy)
-- Only give HIGH confidence if 3+ indicators align. MEDIUM if 2 align. LOW if unclear.
-- Give SELL signals when warranted — do not avoid them
+INSTRUCTIONS:
+- Synthesise ALL data sources holistically
+- RSI >70 = overbought (lean SELL), RSI <30 = oversold (lean BUY)
+- Insider PURCHASES are strongly bullish; SALES are mixed
+- MACD bullish crossover + above SMA20 + positive momentum = strong BUY
+- conviction_score 1-10: only score 7+ warrants HIGH confidence
+- HIGH confidence requires 3+ indicators aligned. MEDIUM if 2 align. LOW if unclear.
+- Do NOT default to HOLD when market is closed if data is directional
 
 Respond ONLY with valid JSON, no markdown:
 {{
@@ -425,19 +417,14 @@ Respond ONLY with valid JSON, no markdown:
   "expected_return_pct": <float>,
   "timeframe": "1-2 weeks|1-3 months|3-6 months",
   "timeframe_days": <int>,
-  "summary": "<2-3 sentences citing specific data points from above>",
+  "summary": "<2-3 sentences citing specific data>",
   "risk": "LOW|MEDIUM|HIGH",
   "key_factors": ["<factor1>", "<factor2>", "<factor3>"],
-  "insider_summary": "<one sentence about insider activity direction and significance>",
-  "sentiment_summary": "<one sentence about retail sentiment and whether it confirms or contrasts>",
-  "price_targets": {{
-    "week1": <float>,
-    "week2": <float>,
-    "month1": <float>,
-    "month3": <float>
-  }},
-  "bull_case": "<one sentence — strongest reason to buy>",
-  "bear_case": "<one sentence — biggest risk>"
+  "insider_summary": "<one sentence about insider activity>",
+  "sentiment_summary": "<one sentence about retail sentiment>",
+  "price_targets": {{"week1": <float>, "week2": <float>, "month1": <float>, "month3": <float>}},
+  "bull_case": "<one sentence>",
+  "bear_case": "<one sentence>"
 }}"""
 
         try:
@@ -453,32 +440,30 @@ Respond ONLY with valid JSON, no markdown:
             logger.error(f"Claude error for {symbol}: {e}")
             return self._fallback(symbol, session, "fallback")
 
-    # ── Fallback ──────────────────────────────────────────────────────────────
-
     def _fallback(self, symbol: str, session: str = "market", trigger: str = "fallback") -> dict:
         now = datetime.now(timezone.utc)
         return {
-            "symbol":             symbol,
-            "signal":             "HOLD",
-            "confidence":         "LOW",
-            "conviction_score":   0,
-            "target_price":       None,
-            "stop_loss":          None,
+            "symbol":              symbol,
+            "signal":              "HOLD",
+            "confidence":          "LOW",
+            "conviction_score":    0,
+            "target_price":        None,
+            "stop_loss":           None,
             "expected_return_pct": 0,
-            "timeframe":          "unknown",
-            "timeframe_days":     30,
-            "summary":            "Signal generation failed — data unavailable.",
-            "risk":               "HIGH",
-            "key_factors":        ["data_unavailable"],
-            "insider_summary":    "No data.",
-            "sentiment_summary":  "No data.",
-            "price_targets":      {},
-            "bull_case":          "Insufficient data.",
-            "bear_case":          "Insufficient data.",
-            "insider_trades":     [],
-            "sentiment":          {},
-            "generated_at":       now.isoformat(),
-            "session":            session,
-            "trigger":            "fallback",
-            "feed_eligible":      False,
+            "timeframe":           "unknown",
+            "timeframe_days":      30,
+            "summary":             "Signal generation failed — data unavailable.",
+            "risk":                "HIGH",
+            "key_factors":         ["data_unavailable"],
+            "insider_summary":     "No data.",
+            "sentiment_summary":   "No data.",
+            "price_targets":       {},
+            "bull_case":           "Insufficient data.",
+            "bear_case":           "Insufficient data.",
+            "insider_trades":      [],
+            "sentiment":           {},
+            "generated_at":        now.isoformat(),
+            "session":             session,
+            "trigger":             "fallback",
+            "feed_eligible":       False,
         }
