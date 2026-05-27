@@ -1,18 +1,12 @@
 """
 routers/signals.py
 
-Feed filtering rules (applied server-side):
-  - signal IN (BUY, SELL)             — no HOLD noise
-  - confidence IN (HIGH, MEDIUM)      — no LOW/fallback noise
-  - generated_at > 7 days ago         — no stale signals (default view)
-  - trigger != "fallback"             — never show failed signals
-  - feed_eligible == True             — set by SignalEngine
-
-History mode (show_all=true): relaxes freshness filter, shows up to 45 days.
-
-Services injected by main.py:
-    signals.signal_svc = signal_svc
-    signals.price_svc  = price_svc
+Feed filtering rules:
+  - signal IN (BUY, SELL)
+  - confidence IN (HIGH, MEDIUM)
+  - generated_at > 7 days ago (default) / 45 days (show_all=true)
+  - trigger != "fallback"
+  - feed_eligible == True
 """
 
 import asyncio
@@ -31,8 +25,42 @@ router = APIRouter()
 signal_svc = None
 price_svc  = None
 
-STALE_DAYS    = 7
-HISTORY_DAYS  = 45
+STALE_DAYS   = 7
+HISTORY_DAYS = 45
+
+
+def _to_iso(val) -> str:
+    """Safely convert Firestore Timestamp, datetime, or ISO string → ISO string."""
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    if hasattr(val, "isoformat"):          # datetime or Firestore DatetimeWithNanoseconds
+        dt = val
+        if hasattr(dt, 'tzinfo') and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    if hasattr(val, "timestamp"):          # Firestore Timestamp (has .timestamp() method)
+        return datetime.fromtimestamp(val.timestamp(), tz=timezone.utc).isoformat()
+    return str(val)
+
+
+def _is_fresh(generated_at_val, cutoff_iso: str) -> bool:
+    """Returns True if the signal was generated after the cutoff."""
+    iso = _to_iso(generated_at_val)
+    if not iso:
+        return False
+    # Normalise both to comparable format (strip timezone suffix for simple comparison)
+    try:
+        gen_dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if gen_dt.tzinfo is None:
+            gen_dt = gen_dt.replace(tzinfo=timezone.utc)
+        cut_dt = datetime.fromisoformat(cutoff_iso.replace("Z", "+00:00"))
+        if cut_dt.tzinfo is None:
+            cut_dt = cut_dt.replace(tzinfo=timezone.utc)
+        return gen_dt > cut_dt
+    except Exception:
+        return False
 
 
 # ── Existing endpoints ────────────────────────────────────────────────────────
@@ -54,29 +82,25 @@ async def get_signal(symbol: str, force: bool = Query(False)):
     return await signal_svc.get_signal(symbol, force=force, session=session)
 
 
-# ── Feed endpoint with filtering ──────────────────────────────────────────────
+# ── Feed ──────────────────────────────────────────────────────────────────────
 
 @router.get("/feed")
 async def get_signal_feed(
     limit:       int  = Query(default=20, ge=1, le=100),
     after:       Optional[str] = Query(default=None),
-    signal_type: Optional[str] = Query(default=None, description="BUY | SELL | HOLD"),
-    confidence:  Optional[str] = Query(default=None, description="HIGH | MEDIUM | LOW"),
-    show_all:    bool = Query(default=False, description="Show full 45-day history, not just last 7 days"),
+    signal_type: Optional[str] = Query(default=None, description="BUY | SELL"),
+    confidence:  Optional[str] = Query(default=None, description="HIGH | MEDIUM"),
+    show_all:    bool = Query(default=False, description="Show full 45-day history"),
 ):
-    """
-    Filtered signal feed — BUY/SELL only, HIGH/MEDIUM confidence, fresh signals.
-    Use show_all=true to see full 45-day history.
-    """
     db = None
     try:
         db = get_db()
     except Exception:
         pass
 
-    cutoff_days  = HISTORY_DAYS if show_all else STALE_DAYS
-    cutoff_dt    = datetime.now(timezone.utc) - timedelta(days=cutoff_days)
-    cutoff_iso   = cutoff_dt.isoformat()
+    cutoff_days = HISTORY_DAYS if show_all else STALE_DAYS
+    cutoff_dt   = datetime.now(timezone.utc) - timedelta(days=cutoff_days)
+    cutoff_iso  = cutoff_dt.isoformat()
 
     if db:
         try:
@@ -91,9 +115,7 @@ async def get_signal_feed(
                         q = q.start_after({"generated_at": after})
                     except Exception:
                         pass
-                # Fetch generously — server-side filters applied below
-                fetch_limit = limit * 6
-                return list(q.limit(fetch_limit).stream())
+                return list(q.limit(limit * 8).stream())
 
             loop     = asyncio.get_event_loop()
             raw_docs = await loop.run_in_executor(None, _query)
@@ -102,42 +124,36 @@ async def get_signal_feed(
             for doc in raw_docs:
                 d = doc.to_dict() or {}
                 d["symbol"] = doc.id
+                # Normalise ALL timestamp fields to ISO strings
                 for k in ("generated_at", "expires_at"):
-                    v = d.get(k)
-                    if v is not None and hasattr(v, "isoformat"):
-                        d[k] = v.isoformat()
+                    d[k] = _to_iso(d.get(k))
                 items.append(d)
 
-            # ── Apply feed filters ────────────────────────────────────────────
             filtered = []
             for d in items:
                 sig  = d.get("signal", "").upper()
                 conf = d.get("confidence", "").upper()
-                gen  = d.get("generated_at", "")
                 trig = d.get("trigger", "")
+                gen  = d.get("generated_at", "")
 
                 # Core quality filters
-                if sig not in ("BUY", "SELL"):
-                    continue
-                if conf not in ("HIGH", "MEDIUM"):
-                    continue
-                if trig == "fallback":
-                    continue
-
-                # Freshness filter
-                if gen < cutoff_iso:
-                    continue
+                if sig  not in ("BUY", "SELL"):      continue
+                if conf not in ("HIGH", "MEDIUM"):    continue
+                if trig == "fallback":                continue
+                if not _is_fresh(gen, cutoff_iso):    continue
 
                 # Optional caller filters
-                if signal_type and sig != signal_type.upper():
-                    continue
-                if confidence and conf != confidence.upper():
-                    continue
+                if signal_type and sig  != signal_type.upper(): continue
+                if confidence  and conf != confidence.upper():  continue
 
                 filtered.append(d)
 
             page        = filtered[:limit]
             next_cursor = page[-1]["generated_at"] if len(filtered) > limit else None
+
+            logger.info(
+                f"Signal feed: {len(raw_docs)} fetched → {len(filtered)} after filter → {len(page)} returned"
+            )
 
             return {
                 "signals":     page,
@@ -158,10 +174,13 @@ async def get_signal_feed(
     # ── Memory cache fallback ─────────────────────────────────────────────────
     logger.info("Signal feed: serving from memory cache")
     cached = signal_svc.get_all_cached()
-    items  = []
+
+    items = []
     for sym, data in cached.items():
         item = dict(data)
         item["symbol"] = sym
+        for k in ("generated_at", "expires_at"):
+            item[k] = _to_iso(item.get(k))
         items.append(item)
 
     items.sort(key=lambda x: x.get("generated_at", ""), reverse=True)
@@ -170,15 +189,15 @@ async def get_signal_feed(
     for d in items:
         sig  = d.get("signal", "").upper()
         conf = d.get("confidence", "").upper()
-        gen  = d.get("generated_at", "")
         trig = d.get("trigger", "")
+        gen  = d.get("generated_at", "")
 
-        if sig not in ("BUY", "SELL"):           continue
-        if conf not in ("HIGH", "MEDIUM"):        continue
-        if trig == "fallback":                    continue
-        if gen < cutoff_iso:                      continue
-        if signal_type and sig != signal_type.upper(): continue
-        if confidence and conf != confidence.upper():  continue
+        if sig  not in ("BUY", "SELL"):      continue
+        if conf not in ("HIGH", "MEDIUM"):    continue
+        if trig == "fallback":                continue
+        if not _is_fresh(gen, cutoff_iso):    continue
+        if signal_type and sig  != signal_type.upper(): continue
+        if confidence  and conf != confidence.upper():  continue
 
         filtered.append(d)
 
