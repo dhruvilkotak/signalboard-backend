@@ -104,7 +104,7 @@ class SignalEngine:
                 # Feed eligibility filter
                 "feed_eligible":    (
                     signal.get("signal") in ("BUY", "SELL") and
-                    signal.get("confidence") in ("HIGH", "MEDIUM") and
+                    signal.get("confidence") == "HIGH" and
                     trigger != "fallback"
                 ),
             })
