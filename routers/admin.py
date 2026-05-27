@@ -4,22 +4,12 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from middleware.auth import get_current_user
 from services.email_service import send_approval_email, send_rejection_email
 from services.firebase_service import get_db
+from middleware.admin_auth import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Admin UIDs — hardcoded for security
-ADMIN_UIDS = {"2fKDBFccZVOwlyaU6QIs4rQTNKb2"}
-
-
-def require_admin(user=Depends(get_current_user)):
-    if user["uid"] not in ADMIN_UIDS:
-        raise HTTPException(403, "Admin access required")
-    return user
-
 
 class ApproveRequest(BaseModel):
     uid:   str

@@ -32,17 +32,10 @@ from services.market_service import MarketService
 from services.ticker_service import TickerService
 from services.ondemand_signal_service import OnDemandSignalService
 from services.signal_engine import SignalEngine
-from middleware.auth import get_current_user
+from middleware.admin_auth import require_admin
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
-
-ADMIN_UIDS = {"2fKDBFccZVOwlyaU6QIs4rQTNKb2"}
-
-def require_admin(user=Depends(get_current_user)):
-    if user["uid"] not in ADMIN_UIDS:
-        raise HTTPException(403, "Admin access required")
-    return user
 
 # ── Service singletons ────────────────────────────────────────────────────────
 price_svc    = PriceService()

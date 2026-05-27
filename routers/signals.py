@@ -16,8 +16,8 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Query, Header, HTTPException
-from firebase_admin import auth
+from fastapi import APIRouter, Query, HTTPException, Depends
+from middleware.admin_auth import require_admin
 from services.firebase_service import get_db
 
 logger = logging.getLogger(__name__)
@@ -28,25 +28,6 @@ price_svc = None
 
 STALE_DAYS = 7
 HISTORY_DAYS = 45
-
-async def require_admin(authorization: str | None):
-    if not authorization:
-        raise HTTPException(status_code=401, detail="Missing auth")
-
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid auth")
-
-    token = authorization.replace("Bearer ", "").strip()
-
-    try:
-        decoded = auth.verify_id_token(token)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-    if not decoded.get("admin", False):
-        raise HTTPException(status_code=403, detail="Admin only")
-
-    return decoded
 
 def _to_iso(val) -> str:
     if val is None:
@@ -287,10 +268,8 @@ async def get_signal_feed(
 @router.delete("/snapshot/{snapshot_id}")
 async def delete_signal_snapshot(
     snapshot_id: str,
-    authorization: str | None = Header(default=None),
+    admin=Depends(require_admin),
 ):
-    await require_admin(authorization)
-
     db = get_db()
 
     try:
@@ -305,12 +284,13 @@ async def delete_signal_snapshot(
             "ok": True,
             "snapshot_id": snapshot_id,
             "deleted": "signal_snapshots",
+            "deleted_by": admin["uid"],
         }
 
     except Exception as e:
         logger.error(f"Delete signal snapshot failed for {snapshot_id}: {e}")
         raise HTTPException(status_code=500, detail="Delete snapshot failed")
-    
+        
 @router.get("/{symbol}")
 async def get_signal(symbol: str, force: bool = Query(False)):
     symbol = symbol.upper().strip()
