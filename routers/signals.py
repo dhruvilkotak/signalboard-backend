@@ -82,7 +82,7 @@ async def get_all_signals():
     return {"signals": cached, "count": len(cached)}
 
 
-@router.get("/feed")
+@router.get("/stream")
 async def get_signal_feed(
     limit:       int  = Query(default=20, ge=1, le=100),
     after:       Optional[str] = Query(default=None),

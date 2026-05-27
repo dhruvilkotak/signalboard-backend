@@ -48,7 +48,7 @@ async def execute_trade(symbol: str):
 @router.post("/run-all")
 async def run_all_signals():
     """Run AI signals for all tickers and execute trades"""
-    signals = await _signal_svc.get_all_signals()
+    signals = signal_svc.get_all_cached()
     prices = await _price_svc.get_all()
     results = []
     for symbol, signal in signals.items():

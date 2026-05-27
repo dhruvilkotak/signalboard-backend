@@ -97,7 +97,12 @@ class SignalService:
 
     # ── Generation ────────────────────────────────────────────────────────────
 
+    _BLOCKED = {"FEED", "STREAM", "SIGNAL", "ALL", "TSLA"}
+
     async def _generate(self, symbol: str, session: str, trigger: str) -> dict:
+        if symbol in self._BLOCKED:
+            logger.warning(f"Blocked signal generation for non-admin symbol: {symbol}")
+            return self._fallback(symbol, session)
         if not self._engine:
             logger.error("SignalService: SignalEngine not set — returning fallback")
             return self._fallback(symbol, session)
