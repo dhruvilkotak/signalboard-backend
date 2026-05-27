@@ -223,14 +223,10 @@ class SignalEngine:
                         xml = xml_res.text
 
                         def _extract(tag: str) -> Optional[str]:
-                            """Extract value from nested <tag><value>X</value></tag> or <tag>X</tag>."""
-                            # Try nested <value> first (standard Form 4 XML)
-                            m = re.search(rf"<{tag}[^>]*>\\s*<value>([^<]+)</value>", xml)
+                            m = re.search(rf"<{tag}[^>]*>[^<]*<value>([^<]+)</value>", xml)
                             if m:
                                 return m.group(1).strip()
-                            # Fallback: direct content
-                            m = re.search(rf"<{tag}[^>]*>([^<
-]+)</{tag}>", xml)
+                            m = re.search(rf"<{tag}[^>]*>([^<]+)</{tag}>", xml)
                             return m.group(1).strip() if m else None
 
                         # Transaction code is direct (no nested <value>)
