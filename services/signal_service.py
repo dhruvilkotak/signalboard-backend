@@ -118,6 +118,7 @@ class SignalService:
 
         self._cache[symbol] = signal
         await self._save_to_firestore(symbol, signal)
+        await self._save_snapshot_if_feed_eligible(symbol, signal)
 
         return signal
 
@@ -200,6 +201,45 @@ class SignalService:
             return (datetime.now(timezone.utc) - t).total_seconds() < CACHE_TTL_SECONDS
         except Exception:
             return False
+    
+    async def _save_snapshot_if_feed_eligible(self, symbol: str, signal: dict):
+        """
+        Immutable feed snapshot.
+
+        If a generated signal is HIGH confidence BUY/SELL, save a copy to
+        signal_snapshots. This keeps the feed stable for 45 days even if the
+        current signal later changes to HOLD.
+        """
+        if not self._db:
+            return
+
+        sig = signal.get("signal", "").upper()
+        conf = signal.get("confidence", "").upper()
+        trigger = signal.get("trigger", "")
+
+        if sig not in ("BUY", "SELL"):
+            return
+        if conf != "HIGH":
+            return
+        if trigger == "fallback":
+            return
+
+        try:
+            snapshot = dict(signal)
+            snapshot["symbol"] = symbol
+            snapshot["snapshot_type"] = "feed_signal"
+            snapshot["snapshot_id"] = f"{symbol}_{snapshot.get('generated_at', '')}"
+
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self._db.collection("signal_snapshots").add(snapshot)
+            )
+
+            logger.info(f"Saved feed snapshot for {symbol}: {sig} {conf}")
+
+        except Exception as e:
+            logger.warning(f"Snapshot save failed for {symbol}: {e}")
 
     def _fallback(self, symbol: str, session: str = "market") -> dict:
         return {
@@ -227,3 +267,33 @@ class SignalService:
             "feed_eligible":      False,
             "generated_at":       datetime.now(timezone.utc).isoformat(),
         }
+    
+    async def _save_snapshot_if_feed_eligible(self, symbol: str, signal: dict):
+        if not self._db:
+            return
+
+        sig = signal.get("signal", "").upper()
+        conf = signal.get("confidence", "").upper()
+        trigger = signal.get("trigger", "")
+
+        if sig not in ("BUY", "SELL"):
+            return
+        if conf != "HIGH":
+            return
+        if trigger == "fallback":
+            return
+
+        try:
+            snapshot = dict(signal)
+            snapshot["symbol"] = symbol
+            snapshot["snapshot_id"] = f"{symbol}_{snapshot.get('generated_at', '')}"
+            snapshot["snapshot_type"] = "feed_signal"
+
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self._db.collection("signal_snapshots").add(snapshot)
+            )
+            logger.info(f"Saved signal snapshot for {symbol}: {sig} {conf}")
+        except Exception as e:
+            logger.warning(f"Snapshot save failed for {symbol}: {e}")
