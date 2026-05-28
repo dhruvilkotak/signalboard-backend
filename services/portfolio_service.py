@@ -209,8 +209,6 @@ class PortfolioService:
         }))
         return total
 
-    # ── Agreement ─────────────────────────────────────────────────────────────
-
     # ══════════════════════════════════════════════════════════════════════════
     # PART 1 — MANUAL TRADES
     # User's personal portfolio. Uses available_cash. Auto-trader ignores these.
@@ -225,9 +223,10 @@ class PortfolioService:
             for pos in positions:
                 p = prices.get(pos["symbol"])
                 if p and p > 0:
-                    cv   = self._r2(pos["shares"] * p)
-                    pnl  = self._r2(cv - pos["shares"] * pos["buy_price"])
-                    ppct = self._r2((pnl / (pos["shares"] * pos["buy_price"])) * 100) if pos["buy_price"] else 0
+                    cv    = self._r2(pos["shares"] * p)
+                    abp   = pos.get("avg_buy_price", pos.get("buy_price", 0))
+                    pnl   = self._r2(cv - pos["shares"] * abp)
+                    ppct  = self._r2((pnl / (pos["shares"] * abp)) * 100) if abp else 0
                     pos.update({"current_price": p, "current_value": cv,
                                 "unrealized_pnl": pnl, "unrealized_pnl_pct": ppct})
         return positions
