@@ -30,6 +30,8 @@ from services.trader_service import TraderService
 from services.technical_service import TechnicalService
 from services.market_service import MarketService
 from services.ticker_service import TickerService
+from services.portfolio_service import PortfolioService
+from services.auto_trader_service import AutoTraderService
 from services.ondemand_signal_service import OnDemandSignalService
 from services.signal_engine import SignalEngine
 from middleware.admin_auth import require_admin
@@ -46,6 +48,9 @@ signal_svc   = SignalService(price_svc, news_svc, tech_svc, market_svc)
 trader_svc   = TraderService()
 ticker_svc   = TickerService()
 ondemand_svc = OnDemandSignalService(price_svc, news_svc)
+portfolio_svc    = PortfolioService()
+auto_trader_svc  = AutoTraderService(portfolio_svc, price_svc, signal_svc)
+
 # SignalEngine: shared by both signal services — created after all deps ready
 engine       = SignalEngine(price_svc, news_svc, tech_svc)
 scheduler    = AsyncIOScheduler(timezone="America/New_York")
@@ -155,7 +160,8 @@ async def market_hours_signal_job():
     logger.info("=== MARKET HOURS signal job ===")
     try:
         await price_svc.update_cache()
-        await run_signals_for_admin_tickers("market", force=False, auto_trade=True)
+        signals = await run_signals_for_admin_tickers("market", force=False, auto_trade=False)  # ← False: stops Alpaca trades
+        await auto_trader_svc.run_for_all_users(signals)   # ← new: runs per-user Firestore trades
     except Exception as e:
         logger.error(f"Market hours job failed: {e}")
 
@@ -187,6 +193,8 @@ async def lifespan(app: FastAPI):
         signal_svc.set_db(db)
         ticker_svc.set_db(db)
         ondemand_svc.set_db(db)
+        portfolio_svc.set_db(db)
+        auto_trader_svc.set_db(db)
     else:
         logger.warning("Running WITHOUT Firebase")
 
@@ -197,7 +205,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(news_refresh_job,   "interval", minutes=15,  id="news_refresh")
     scheduler.add_job(ticker_svc.refresh, "interval", hours=1,     id="ticker_refresh")
     scheduler.add_job(price_spike_job,    "interval", seconds=30,  id="price_spike_resignal")
-
+    scheduler.add_job(auto_trader_svc.stop_loss_monitor, "interval", seconds=60, id="stop_loss_monitor")
     for hour, minute in [(4,0),(6,0),(8,0),(9,0)]:
         scheduler.add_job(pre_market_signal_job,
             CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone="America/New_York"),
@@ -226,7 +234,7 @@ app = FastAPI(title="Signal Board API", version="2.3.0", lifespan=lifespan, redi
 
 app.add_middleware(CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
-from routers import prices, news, signals, trader, alerts, chat, quote, watchlist, search, admin
+from routers import prices, news, signals, trader, alerts, chat, quote, watchlist, search, admin, portfolio
 from routers import ondemand
 
 signals.signal_svc    = signal_svc
@@ -240,6 +248,9 @@ prices.price_svc      = price_svc
 news.news_svc         = news_svc
 search.price_svc      = price_svc
 ondemand.ondemand_svc = ondemand_svc
+portfolio.portfolio_svc   = portfolio_svc
+portfolio.auto_trader_svc = auto_trader_svc
+portfolio.price_svc       = price_svc
 
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
@@ -252,6 +263,7 @@ app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"]
 app.include_router(search.router,    prefix="/api/search",    tags=["search"])
 app.include_router(admin.router,     prefix="/api/admin",     tags=["admin"])
 app.include_router(ondemand.router,  prefix="/api/ondemand",  tags=["ondemand"])
+app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 
 @app.get("/api/market", tags=["market"])
 async def get_market_context():
@@ -299,7 +311,7 @@ async def websocket_prices(websocket: WebSocket):
         mgr.disconnect(websocket)
 
 @app.get("/health")
-async def health():
+async def health():                          # ← add async here
     return {
         "status": "ok", "version": "2.3.0",
         "current_session": get_current_session(),
@@ -315,5 +327,6 @@ async def health():
             "spike_resignal": "Every 30s (>2% move, 30-min cooldown)",
         },
         "tickers":   ticker_svc.status(),
+        "auto_trader": await auto_trader_svc.get_status() if auto_trader_svc else {"enabled": True},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
