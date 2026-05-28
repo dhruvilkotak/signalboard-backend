@@ -64,8 +64,10 @@ class ToggleRequest(BaseModel):
     is_active: bool
 
 class TradeRequest(BaseModel):
-    symbol: str
-    action: str   # "BUY" | "SELL"
+    symbol:     str
+    action:     str            # "BUY" | "SELL"
+    amount_usd: Optional[float] = None   # buy $X worth (fractional shares)
+    shares:     Optional[float] = None   # buy exactly N shares
 
 class KillSwitchRequest(BaseModel):
     enabled: bool
@@ -337,24 +339,29 @@ async def accept_agreement(user=Depends(get_current_user)):
 
 @router.post("/trade")
 async def manual_trade(req: TradeRequest, user=Depends(get_current_user)):
-    """
-    User-triggered BUY or SELL from the Live Prices page.
-    Bypasses auto-trader is_active and universe restrictions.
-    Still requires agreement_accepted.
-    """
     _require_auto_trader_svc()
     uid    = user["uid"]
     action = req.action.upper()
-
+ 
     if action not in ("BUY", "SELL"):
         raise HTTPException(400, "action must be BUY or SELL")
-
+ 
     symbol = req.symbol.strip().upper()
     if not symbol:
         raise HTTPException(400, "symbol is required")
-
+ 
+    # Validate amount inputs
+    if action == "BUY" and req.amount_usd is not None and req.amount_usd <= 0:
+        raise HTTPException(400, "amount_usd must be positive")
+    if action == "BUY" and req.shares is not None and req.shares <= 0:
+        raise HTTPException(400, "shares must be positive")
+ 
     try:
-        result = await auto_trader_svc.execute_manual_trade(uid, symbol, action)
+        result = await auto_trader_svc.execute_manual_trade(
+            uid, symbol, action,
+            amount_usd=req.amount_usd,
+            shares=req.shares,
+        )
         if result.get("status") == "error":
             raise HTTPException(400, result.get("reason", "Trade failed"))
         return result
@@ -363,7 +370,6 @@ async def manual_trade(req: TradeRequest, user=Depends(get_current_user)):
     except Exception as e:
         logger.error(f"manual_trade failed for {uid} {action} {symbol}: {e}")
         raise HTTPException(500, "Trade execution failed")
-
 
 # ── Admin endpoints ───────────────────────────────────────────────────────────
 

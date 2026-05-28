@@ -501,6 +501,78 @@ class PortfolioService:
         )
         return {"status": "executed", "action": "BUY", **trade}
 
+    async def _execute_buy_shares(
+        self,
+        uid:     str,
+        symbol:  str,
+        price:   float,
+        shares:  float,
+        signal:  dict,
+        trigger: str = "manual",
+    ) -> dict:
+        """
+        Execute a BUY with an exact share count (for manual fractional trades).
+        Skips strategy position sizing — caller is responsible for validation.
+        """
+        symbol = symbol.upper()
+        wallet = await self.get_or_create_wallet(uid)
+
+        strategy_key   = wallet.get("strategy", "balanced")
+        cfg            = STRATEGIES.get(strategy_key, STRATEGIES["balanced"])
+        position_size  = round(shares * price, 2)
+        stop_loss_price = round(price * (1 - wallet.get("stop_loss_pct", cfg["stop_loss_default"]) / 100), 2)
+
+        now = self._now_iso()
+
+        position = {
+            "symbol":             symbol,
+            "shares":             round(shares, 6),
+            "buy_price":          price,
+            "buy_date":           now,
+            "current_price":      price,
+            "current_value":      position_size,
+            "unrealized_pnl":     0.0,
+            "unrealized_pnl_pct": 0.0,
+            "stop_loss_price":    stop_loss_price,
+            "strategy_at_buy":    strategy_key,
+            "signal_ref":         signal.get("generated_at", now),
+            "signal_confidence":  signal.get("confidence", "HIGH"),
+            "signal_conviction":  signal.get("conviction_score", 0),
+        }
+        await self._run(lambda: self._position_ref(uid, symbol).set(position))
+
+        new_balance  = round(wallet["balance"] - position_size, 2)
+        new_invested = round(wallet.get("invested", 0.0) + position_size, 2)
+
+        await self._run(lambda: self._trader_ref(uid).update({
+            "balance":      new_balance,
+            "invested":     new_invested,
+            "total_value":  round(new_balance + new_invested, 2),
+            "last_updated": now,
+        }))
+
+        trade = {
+            "symbol":            symbol,
+            "action":            "BUY",
+            "shares":            round(shares, 6),
+            "price":             price,
+            "total":             position_size,
+            "pnl":               0.0,
+            "reason":            signal.get("summary", "Manual buy"),
+            "signal_ref":        signal.get("generated_at", now),
+            "signal_confidence": signal.get("confidence", "HIGH"),
+            "trigger":           trigger,
+            "balance_after":     new_balance,
+            "timestamp":         now,
+        }
+        await self._run(lambda: self._trades_ref(uid).add(trade))
+
+        logger.info(
+            f"PortfolioService: BUY {symbol} {shares:.6f}sh @ ${price:.2f} "
+            f"(${position_size:.2f}) trigger={trigger} for {uid}"
+        )
+        return {"status": "executed", "action": "BUY", **trade}
+
     async def execute_sell(
         self,
         uid:     str,

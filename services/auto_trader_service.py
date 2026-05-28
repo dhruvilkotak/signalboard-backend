@@ -402,14 +402,18 @@ class AutoTraderService:
 
     async def execute_manual_trade(
         self,
-        uid:    str,
-        symbol: str,
-        action: str,   # "BUY" | "SELL"
+        uid:        str,
+        symbol:     str,
+        action:     str,            # "BUY" | "SELL"
+        amount_usd: float = None,   # e.g. 150.00 → buy $150 worth (fractional)
+        shares:     float = None,   # e.g. 0.25 → buy exactly 0.25 shares
     ) -> dict:
         """
-        User-triggered trade from the Live Prices page buy/sell buttons.
+        User-triggered trade from the Live Prices page.
         Bypasses is_active and universe checks; still requires agreement_accepted.
-        Uses current market price from price_service.
+
+        Amount priority: shares > amount_usd > strategy position sizing
+        Fractional shares supported (stored to 6 decimal places).
         """
         symbol = symbol.upper()
 
@@ -425,12 +429,45 @@ class AutoTraderService:
         if not price or price <= 0:
             return {"status": "error", "reason": f"No valid price available for {symbol}"}
 
+        # Build custom signal with override position size for manual trades
+        signal = {"confidence": "HIGH", "summary": "Manual trade"}
+
         if action == "BUY":
-            return await self.portfolio_svc.execute_buy(
-                uid, symbol, price,
-                signal={"confidence": "HIGH", "summary": "Manual buy"},
-                trigger="manual",
+            # Calculate shares from input
+            if shares and shares > 0:
+                computed_shares = round(shares, 6)
+                cost            = round(computed_shares * price, 2)
+            elif amount_usd and amount_usd > 0:
+                computed_shares = round(amount_usd / price, 6)
+                cost            = round(amount_usd, 2)
+            else:
+                # Fall back to strategy position sizing (existing behaviour)
+                return await self.portfolio_svc.execute_buy(
+                    uid, symbol, price, signal=signal, trigger="manual",
+                )
+
+            # Validate wallet has enough cash
+            wallet = await self.portfolio_svc.get_wallet(uid)
+            if not wallet:
+                return {"status": "error", "reason": "Wallet not found"}
+            if not wallet.get("agreement_accepted"):
+                return {"status": "error", "reason": "Paper trading agreement not accepted"}
+            if cost > wallet.get("balance", 0):
+                return {
+                    "status": "error",
+                    "reason": f"Insufficient cash — need ${cost:.2f}, have ${wallet['balance']:.2f}",
+                }
+
+            # Check not already holding
+            existing = await self.portfolio_svc.get_position(uid, symbol)
+            if existing:
+                return {"status": "skipped", "reason": f"Already holding {symbol}"}
+
+            # Execute with custom shares directly (bypass strategy sizing)
+            return await self.portfolio_svc._execute_buy_shares(
+                uid, symbol, price, computed_shares, signal, trigger="manual",
             )
+
         elif action == "SELL":
             return await self.portfolio_svc.execute_sell(
                 uid, symbol, price,
@@ -439,8 +476,8 @@ class AutoTraderService:
                 reason="Manual sell from Live Prices",
             )
         else:
-            return {"status": "error", "reason": f"Unknown action '{action}' — must be BUY or SELL"}
-
+            return {"status": "error", "reason": f"Unknown action '{action}'"}
+        
     # ── Admin kill switch control ─────────────────────────────────────────────
 
     async def set_kill_switch(self, enabled: bool) -> dict:
