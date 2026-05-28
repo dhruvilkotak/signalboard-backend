@@ -101,11 +101,19 @@ async def get_overview(user=Depends(get_current_user)):
 
 @router.get("/summary")
 async def get_summary(user=Depends(get_current_user)):
-    """Available cash + total value — used by header bar."""
+    """
+    Available cash + total value — used by header bar.
+    Recalculates total_value live from Firestore positions so the header
+    is always accurate on page reload without needing a full overview fetch.
+    """
     _need_portfolio()
+    uid = user["uid"]
     try:
-        return await portfolio_svc.get_or_create_summary(user["uid"])
+        # Sync total_value first so header always shows correct value on reload
+        await portfolio_svc._sync_total_value(uid)
+        return await portfolio_svc.get_or_create_summary(uid)
     except Exception as e:
+        logger.error(f"get_summary {uid}: {e}")
         raise HTTPException(500, str(e))
 
 @router.post("/agreement")
