@@ -93,10 +93,14 @@ async def _prices() -> dict:
 async def get_overview(user=Depends(get_current_user)):
     """Full dashboard — summary + manual portfolio + all strategy cards."""
     _need_portfolio()
+    uid = user["uid"]
+    logger.info(f"[portfolio] GET /overview uid={uid[:8]}…")
     try:
-        return await portfolio_svc.get_overview(user["uid"], await _prices())
+        result = await portfolio_svc.get_overview(uid, await _prices())
+        logger.info(f"[portfolio] GET /overview OK uid={uid[:8]}…")
+        return result
     except Exception as e:
-        logger.error(f"get_overview {user['uid']}: {e}")
+        logger.error(f"[portfolio] GET /overview FAILED uid={uid[:8]}… err={e}")
         raise HTTPException(500, "Failed to load portfolio")
 
 @router.get("/summary")
@@ -166,6 +170,7 @@ async def manual_buy(req: ManualBuyRequest, user=Depends(get_current_user)):
     """Buy stock from available cash. No strategy needed."""
     _need_auto_trader()
     uid = user["uid"]
+    logger.info(f"[portfolio] POST /manual/buy uid={uid[:8]}… symbol={req.symbol} amount={req.amount_usd} shares={req.shares}")
     if not req.symbol.strip():
         raise HTTPException(400, "symbol is required")
     if req.amount_usd is None and req.shares is None:
