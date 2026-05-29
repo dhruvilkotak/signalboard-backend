@@ -84,9 +84,9 @@ STRATEGIES: dict[str, dict] = {
     },
     "conservative": {
         "label":             "Conservative",
-        "description":       "50% defensive ETFs, 30% blue-chip, 20% cash reserve. HIGH confidence BUY only. Capital preservation first.",
+        "description":       "50% defensive ETFs, 30% blue-chip, 20% cash reserve. HIGH confidence BUY only. Max 20% per position. Capital preservation first.",
         "risk_level":        "LOW",
-        "position_pct":      0.10,
+        "position_pct":      0.20,
         "min_confidence":    "HIGH",
         "stop_loss_default": 3.0,
         "stop_loss_min":     1.0,
@@ -209,6 +209,8 @@ class PortfolioService:
         }))
         return total
 
+    # ── Agreement ─────────────────────────────────────────────────────────────
+
     # ══════════════════════════════════════════════════════════════════════════
     # PART 1 — MANUAL TRADES
     # User's personal portfolio. Uses available_cash. Auto-trader ignores these.
@@ -223,10 +225,9 @@ class PortfolioService:
             for pos in positions:
                 p = prices.get(pos["symbol"])
                 if p and p > 0:
-                    cv    = self._r2(pos["shares"] * p)
-                    abp   = pos.get("avg_buy_price", pos.get("buy_price", 0))
-                    pnl   = self._r2(cv - pos["shares"] * abp)
-                    ppct  = self._r2((pnl / (pos["shares"] * abp)) * 100) if abp else 0
+                    cv   = self._r2(pos["shares"] * p)
+                    pnl  = self._r2(cv - pos["shares"] * pos["buy_price"])
+                    ppct = self._r2((pnl / (pos["shares"] * pos["buy_price"])) * 100) if pos["buy_price"] else 0
                     pos.update({"current_price": p, "current_value": cv,
                                 "unrealized_pnl": pnl, "unrealized_pnl_pct": ppct})
         return positions
@@ -622,8 +623,12 @@ class PortfolioService:
         cash_avail = strat["cash_in_strategy"]
         reserve    = self._r2(cash_avail * cfg["cash_reserve_pct"])
         investable = self._r2(cash_avail - reserve)
-        cost       = self._r2(investable * cfg["position_pct"])
-        shares     = round(cost / price, 6) if price > 0 else 0
+
+        # Use ORIGINAL allocation for position sizing — keeps positions equal size
+        # even as cash depletes. Cap at investable so we never overspend.
+        target_cost = self._r2(strat["allocated"] * cfg["position_pct"])
+        cost        = self._r2(min(target_cost, investable))
+        shares      = round(cost / price, 6) if price > 0 else 0
 
         if cost < 1.0 or shares <= 0:
             return {"status": "skipped", "reason": f"Insufficient strategy cash (${cash_avail:.2f})"}

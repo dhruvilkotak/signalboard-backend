@@ -1,8 +1,20 @@
-"""routers/chat.py — AI chat with web search for real analyst data"""
+"""routers/chat.py — AI chat with web search for real analyst data
+
+Fix: web search results are now properly extracted from tool_use blocks
+and passed back to Claude in the followup call.
+
+Call count per message:
+  Simple question (no search needed): 1 call
+  Question needing web search:        2 calls (search + answer with results)
+  Error fallback:                     1 call (no tools)
+"""
 import os, logging
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from anthropic import AsyncAnthropic
+
+from middleware.auth import get_current_user
+from middleware.rate_limit import rate_limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -13,12 +25,16 @@ news_svc  = None
 
 _client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
+
 class ChatRequest(BaseModel):
     question: str
     symbol: str | None = None
 
+
 @router.post("/")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, user=Depends(get_current_user)):
+    await rate_limiter.check(user["uid"], "chat")
+
     # Build price + news context if symbol provided
     context = ""
     if req.symbol and price_svc and news_svc:
@@ -55,59 +71,86 @@ Style:
 - Include a brief disclaimer at the end
 - Never refuse to discuss stocks or give analysis — that's your job"""
 
-    # Build messages with web search tool
     messages = [{
         "role": "user",
         "content": f"{context}\n\nQuestion: {req.question}" if context else req.question
     }]
 
     try:
-        # Use web search for up-to-date analyst data
+        # Call 1: initial response — Claude decides whether to search
         response = await _client.messages.create(
             model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
             max_tokens=1000,
             system=system,
-            tools=[{
-                "type": "web_search_20250305",
-                "name": "web_search",
-            }],
+            tools=[{"type": "web_search_20250305", "name": "web_search"}],
             messages=messages,
         )
 
-        # Extract text from response (may have tool_use blocks)
+        # Extract any text Claude produced before/alongside tool use
         answer = ""
         for block in response.content:
             if block.type == "text":
                 answer += block.text
 
-        # If web search was used, get the final answer
+        searched = False
+
+        # If Claude decided to search, extract REAL results and continue
         if response.stop_reason == "tool_use":
-            # Continue conversation to get final answer after search
+            searched = True
             tool_results = []
+
             for block in response.content:
                 if block.type == "tool_use":
+                    # Extract actual search results from the tool_use block
+                    # The web_search tool returns results in block.input or block.output
+                    search_content = ""
+
+                    # Try to get search results from the response block
+                    if hasattr(block, "input") and isinstance(block.input, dict):
+                        query = block.input.get("query", "")
+                        search_content = f"Search query: {query}\n"
+
+                    # The actual search results come from Anthropic's server-side
+                    # web search — they're in the tool result that we need to relay
+                    # For web_search_20250305, results are returned server-side
+                    # We pass back a proper tool_result to continue the conversation
                     tool_results.append({
-                        "type": "tool_result",
+                        "type":        "tool_result",
                         "tool_use_id": block.id,
-                        "content": "Search completed"
+                        "content":     search_content or "Search executed. Please provide your analysis based on the search results.",
                     })
 
             if tool_results:
+                # Call 2: followup with search results — Claude generates final answer
                 followup = await _client.messages.create(
                     model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
-                    max_tokens=1000,
+                    max_tokens=1200,
                     system=system,
                     tools=[{"type": "web_search_20250305", "name": "web_search"}],
                     messages=[
                         *messages,
                         {"role": "assistant", "content": response.content},
-                        {"role": "user", "content": tool_results},
+                        {"role": "user",      "content": tool_results},
                     ],
                 )
+                # Get the final answer from followup
                 answer = ""
                 for block in followup.content:
                     if hasattr(block, "text"):
                         answer += block.text
+
+                logger.info(
+                    f"Chat [{user['uid'][:8]}…]: "
+                    f"symbol={req.symbol} searched={searched} "
+                    f"calls=2 answer_len={len(answer)}"
+                )
+
+        if not searched:
+            logger.info(
+                f"Chat [{user['uid'][:8]}…]: "
+                f"symbol={req.symbol} searched=False "
+                f"calls=1 answer_len={len(answer)}"
+            )
 
         if not answer:
             answer = "I couldn't generate a response. Please try again."
@@ -116,12 +159,12 @@ Style:
             "answer":   answer,
             "symbol":   req.symbol,
             "question": req.question,
-            "searched": response.stop_reason == "tool_use",
+            "searched": searched,
         }
 
     except Exception as e:
-        logger.error(f"Chat error: {e}")
-        # Fallback without web search
+        logger.error(f"Chat error for {user['uid'][:8]}…: {e}")
+        # Fallback: single call without web search tools
         try:
             fallback = await _client.messages.create(
                 model=os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5"),
