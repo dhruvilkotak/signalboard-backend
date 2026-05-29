@@ -1,8 +1,8 @@
 """
 routers/signals.py — v2
 
-Feed reads from signal_snapshots/{symbol} — one doc per symbol, no duplicates.
-History reads from signal_snapshots/{symbol}/history — subcollection, DESC order.
+Feed reads from signals/{symbol} — one doc per symbol, no duplicates.
+History reads from signals/{symbol}/history — subcollection, DESC order.
 """
 
 import logging
@@ -88,7 +88,7 @@ async def get_signal_feed(
 ):
     """
     Signal feed — one card per symbol, no duplicates.
-    Reads signal_snapshots/{symbol} collection directly.
+    Reads signals/{symbol} collection directly.
     Sorted by generated_at DESC (most recent first).
     """
     db = get_db()
@@ -102,19 +102,28 @@ async def get_signal_feed(
         cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days if not show_all else 45)).isoformat()
 
         def _query():
-            q = db.collection("signal_snapshots")
-            if not show_all:
-                q = q.where("feed_eligible", "==", True)
-            if confidence and confidence != "ALL":
+            q = db.collection("signals")
+            q = q.where("feed_eligible", "==", True)
+            if confidence != "ALL":
                 q = q.where("confidence", "==", confidence)
             q = q.where("generated_at", ">", cutoff)
+
             docs = q.stream()
             results = []
+
             for doc in docs:
                 d = doc.to_dict() or {}
-                d["snapshot_doc_id"] = doc.id   # symbol
+                d["snapshot_doc_id"] = doc.id
+                d["symbol"] = doc.id
+
+                if d.get("signal") not in ("BUY", "SELL"):
+                    continue
+
+                if d.get("trigger") == "fallback":
+                    continue
+
                 results.append(_ser(d))
-            # Sort by generated_at DESC in Python (Firestore needs composite index for multi-where + order_by)
+
             results.sort(key=lambda x: x.get("generated_at", ""), reverse=True)
             return results
 
@@ -126,7 +135,7 @@ async def get_signal_feed(
             "signals":    items,
             "count":      len(items),
             "next_cursor": None,
-            "source":     "firestore_signal_snapshots",
+            "source":     "firestore_signals_current",
             "filters":    {
                 "confidence": confidence,
                 "show_all":   show_all,
@@ -154,9 +163,10 @@ async def get_signal_history(
 ):
     """
     Signal history for one symbol.
-    Reads signal_snapshots/{symbol}/history ordered by generated_at DESC.
+    Reads signals/{symbol}/history ordered by generated_at DESC.
     Feed-eligible only, last 20 days.
     """
+    HISTORY_MAX_ITEMS  = 20
     db = get_db()
     if not db:
         raise HTTPException(503, "Database not available")
@@ -167,11 +177,11 @@ async def get_signal_history(
         sym  = symbol.upper().strip()
 
         def _fetch():
-            snap_ref = db.collection("signal_snapshots").document(sym)
+            snap_ref = db.collection("signals").document(sym)
             docs     = (
                 snap_ref.collection("history")
                 .order_by("generated_at", direction=fs.Query.DESCENDING)
-                .limit(50)
+                .limit(HISTORY_MAX_ITEMS)
                 .stream()
             )
             return [_ser(d.to_dict() or {}) for d in docs]
@@ -238,7 +248,7 @@ async def delete_signal_snapshot(snapshot_id: str, admin=Depends(require_admin))
         sym = snapshot_id.split("_")[0] if "_" in snapshot_id else snapshot_id
         await loop.run_in_executor(
             None,
-            lambda: db.collection("signal_snapshots").document(sym).delete(),
+            lambda: db.collection("signals").document(sym).delete(),
         )
         if signal_svc:
             signal_svc.invalidate(sym)
