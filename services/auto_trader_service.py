@@ -69,18 +69,29 @@ class AutoTraderService:
         counts   = {"buys": 0, "sells": 0, "skipped": 0, "rebalances": 0}
 
         for symbol, signal in signals.items():
-            if symbol not in universe or signal.get("signal") != "SELL": continue
+            if symbol not in universe: continue
+            # Bug 2 fix: use current_signal if available (snapshot may be stale)
+            effective_signal = signal.get("current_signal") or signal.get("signal")
+            if effective_signal != "SELL": continue
+            # Bug 3 fix: check feed_eligible on SELL path too
+            if not signal.get("feed_eligible"): counts["skipped"] += 1; continue
             price = prices.get(symbol, 0)
             if price <= 0: continue
             r = await self.portfolio_svc.strategy_sell(uid, symbol, sk, price, signal, trigger="auto", reason=signal.get("summary",""))
             counts["sells" if r.get("status") == "executed" else "skipped"] += 1
 
         for symbol, signal in signals.items():
-            if symbol not in universe or signal.get("signal") != "BUY": continue
+            if symbol not in universe: continue
+            # Bug 2 fix: use current_signal/current_confidence (snapshot may be stale)
+            effective_signal = signal.get("current_signal") or signal.get("signal")
+            effective_conf   = signal.get("current_confidence") or signal.get("confidence")
+            if effective_signal != "BUY": continue
             if not signal.get("feed_eligible"): counts["skipped"] += 1; continue
             price = prices.get(symbol, 0)
             if price <= 0: continue
-            r = await self.portfolio_svc.strategy_buy(uid, symbol, sk, price, signal, trigger="auto")
+            # Inject effective values so strategy_buy confidence check uses live signal
+            signal_effective = {**signal, "signal": effective_signal, "confidence": effective_conf}
+            r = await self.portfolio_svc.strategy_buy(uid, symbol, sk, price, signal_effective, trigger="auto")
             if r.get("status") == "executed":
                 counts["buys"] += 1
             elif "Insufficient" in r.get("reason", ""):

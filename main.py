@@ -88,7 +88,15 @@ async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: b
             return sym, await signal_svc.get_signal(sym, force=force, session=session, trigger="scheduled")
 
     results = await asyncio.gather(*[_one(t) for t in tickers], return_exceptions=True)
-    signals = {sym: sig for r in results if not isinstance(r, Exception) for sym, sig in [r]}
+    # Deduplicate by symbol — keep freshest generated_at (same ticker may run
+    # across multiple sessions: pre/market/post, producing multiple results)
+    raw_signals = [r for r in results if not isinstance(r, Exception)]
+    deduped: dict = {}
+    for sym, sig in raw_signals:
+        existing = deduped.get(sym)
+        if not existing or str(sig.get("generated_at", "")) > str(existing.get("generated_at", "")):
+            deduped[sym] = sig
+    signals = deduped
 
     buy  = sum(1 for s in signals.values() if s.get("signal") == "BUY")
     sell = sum(1 for s in signals.values() if s.get("signal") == "SELL")
