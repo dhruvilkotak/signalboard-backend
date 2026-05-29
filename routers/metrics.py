@@ -11,8 +11,13 @@ Design doc §10.2.
 import os
 import time
 import logging
-import psutil
 from datetime import datetime, timezone
+
+try:
+    import psutil
+    _HAS_PSUTIL = True
+except ImportError:
+    _HAS_PSUTIL = False
 from fastapi import APIRouter, Depends, HTTPException
 
 from middleware.admin_auth import require_admin
@@ -59,6 +64,8 @@ def increment(key: str, amount: int = 1):
 
 
 def get_memory_mb() -> float:
+    if not _HAS_PSUTIL:
+        return 0.0
     try:
         proc = psutil.Process(os.getpid())
         return round(proc.memory_info().rss / 1024 / 1024, 1)

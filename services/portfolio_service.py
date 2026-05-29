@@ -226,8 +226,9 @@ class PortfolioService:
                 p = prices.get(pos["symbol"])
                 if p and p > 0:
                     cv   = self._r2(pos["shares"] * p)
-                    pnl  = self._r2(cv - pos["shares"] * pos["buy_price"])
-                    ppct = self._r2((pnl / (pos["shares"] * pos["buy_price"])) * 100) if pos["buy_price"] else 0
+                    abp  = pos.get("avg_buy_price", pos.get("buy_price", 0))
+                    pnl  = self._r2(cv - pos["shares"] * abp)
+                    ppct = self._r2((pnl / (pos["shares"] * abp)) * 100) if abp else 0
                     pos.update({"current_price": p, "current_value": cv,
                                 "unrealized_pnl": pnl, "unrealized_pnl_pct": ppct})
         return positions
@@ -281,7 +282,7 @@ class PortfolioService:
         if existing:
             # Average down — combine with existing position
             total_shares    = self._r2(existing["shares"] + qty)
-            total_cost      = self._r2(existing["shares"] * existing["avg_buy_price"] + cost)
+            total_cost      = self._r2(existing["shares"] * existing.get("avg_buy_price", existing.get("buy_price", 0)) + cost)
             new_avg         = self._r2(total_cost / total_shares)
             await self._run(lambda: self._manual_pos_ref(uid, symbol).update({
                 "shares":        total_shares,
@@ -351,7 +352,7 @@ class PortfolioService:
         if qty > held:
             return {"status": "error", "reason": f"Cannot sell {qty:.4f} shares — only holding {held:.4f}"}
 
-        avg_bp    = position["avg_buy_price"]
+        avg_bp    = position.get("avg_buy_price", position.get("buy_price", 0))
         proceeds  = self._r2(qty * price)
         cost_basis = self._r2(qty * avg_bp)
         pnl       = self._r2(proceeds - cost_basis)
@@ -569,8 +570,9 @@ class PortfolioService:
                 p = prices.get(pos["symbol"])
                 if p and p > 0:
                     cv   = self._r2(pos["shares"] * p)
-                    pnl  = self._r2(cv - pos["shares"] * pos["buy_price"])
-                    ppct = self._r2((pnl / (pos["shares"] * pos["buy_price"])) * 100) if pos["buy_price"] else 0
+                    abp  = pos.get("avg_buy_price", pos.get("buy_price", 0))
+                    pnl  = self._r2(cv - pos["shares"] * abp)
+                    ppct = self._r2((pnl / (pos["shares"] * abp)) * 100) if abp else 0
                     pos.update({"current_price": p, "current_value": cv,
                                 "unrealized_pnl": pnl, "unrealized_pnl_pct": ppct})
         return positions
@@ -586,8 +588,9 @@ class PortfolioService:
                 p = prices.get(pos["symbol"])
                 if p and p > 0:
                     cv   = self._r2(pos["shares"] * p)
-                    pnl  = self._r2(cv - pos["shares"] * pos["buy_price"])
-                    ppct = self._r2((pnl / (pos["shares"] * pos["buy_price"])) * 100) if pos["buy_price"] else 0
+                    abp  = pos.get("avg_buy_price", pos.get("buy_price", 0))
+                    pnl  = self._r2(cv - pos["shares"] * abp)
+                    ppct = self._r2((pnl / (pos["shares"] * abp)) * 100) if abp else 0
                     pos.update({"current_price": p, "current_value": cv,
                                 "unrealized_pnl": pnl, "unrealized_pnl_pct": ppct})
         return positions
