@@ -5,6 +5,13 @@ Only manages STRATEGY trades. Manual trades are completely separate.
 import asyncio, logging
 from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
+
+def _metrics_increment(key: str):
+    try:
+        from routers.metrics import increment
+        increment(key)
+    except Exception:
+        pass
 REBALANCE_RETURN_EDGE  = 2.0
 REBALANCE_WINNER_GUARD = 10.0
 
@@ -60,6 +67,7 @@ class AutoTraderService:
 
         await asyncio.gather(*[_process(uid, sk) for uid, sk in pairs])
         logger.info(f"AutoTrader: {summary['buys']} buys / {summary['sells']} sells across {len(pairs)} strategy accounts")
+        for _ in range(summary["buys"] + summary["sells"]): _metrics_increment("trades_today")
         return summary
 
     async def _process_strategy(self, uid, sk, signals, prices):
@@ -126,6 +134,7 @@ class AutoTraderService:
                 except Exception as e:
                     logger.error(f"Stop-loss check failed for {uid}: {e}")
         await asyncio.gather(*[_check(uid) for uid in uids])
+        for _ in range(total): _metrics_increment("stop_losses_today")
         return {"triggered": total, "users_checked": len(uids)}
 
     async def rebalance_strategy(self, uid, sk, new_symbol, new_signal, prices) -> bool:

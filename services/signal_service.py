@@ -18,6 +18,14 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# Lazy import to avoid circular — metrics module imports nothing from services
+def _metrics_increment(key: str):
+    try:
+        from routers.metrics import increment
+        increment(key)
+    except Exception:
+        pass
+
 CACHE_TTL_SECONDS  = getattr(settings, "SIGNAL_CACHE_TTL", 1800)  # 30 min
 FIRESTORE_TTL_DAYS = 45
 HISTORY_TTL_DAYS   = 20   # keep history subcollection clean
@@ -57,6 +65,7 @@ class SignalService:
             stored = await self._load_from_firestore(symbol)
             if stored:
                 self._cache[symbol] = stored
+                _metrics_increment("cache_hits_today")
                 await self._bump_expiry(symbol)
                 return stored
 
@@ -98,6 +107,8 @@ class SignalService:
         signal["session"] = session
 
         self._cache[symbol] = signal
+        _metrics_increment("signals_generated_today")
+        _metrics_increment("claude_calls_today")
         await self._save_to_firestore(symbol, signal)
         await self._save_snapshot_if_feed_eligible(symbol, signal)
         return signal
@@ -256,6 +267,7 @@ class SignalService:
             def _fetch():
                 docs = (
                     snap_ref.collection("history")
+                    .where("feed_eligible", "==", True)
                     .order_by("generated_at", direction=fs.Query.DESCENDING)
                     .limit(50)
                     .stream()

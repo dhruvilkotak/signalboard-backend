@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
 from middleware.auth import get_current_user
+from middleware.rate_limit import rate_limiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

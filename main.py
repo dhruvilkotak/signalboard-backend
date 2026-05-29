@@ -35,6 +35,8 @@ from services.auto_trader_service import AutoTraderService
 from services.ondemand_signal_service import OnDemandSignalService
 from services.signal_engine import SignalEngine
 from middleware.admin_auth import require_admin
+from middleware.maintenance import MaintenanceModeMiddleware
+from middleware.rate_limit import limiter as rate_limiter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -203,6 +205,12 @@ async def lifespan(app: FastAPI):
         ondemand_svc.set_db(db)
         portfolio_svc.set_db(db)
         auto_trader_svc.set_db(db)
+
+        # Wire services into metrics router
+        metrics_router.signal_svc      = signal_svc
+        metrics_router.portfolio_svc   = portfolio_svc
+        metrics_router.auto_trader_svc = auto_trader_svc
+        metrics_router.limiter         = rate_limiter
     else:
         logger.warning("Running WITHOUT Firebase")
 
@@ -214,6 +222,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(ticker_svc.refresh, "interval", hours=1,     id="ticker_refresh")
     scheduler.add_job(price_spike_job,    "interval", seconds=30,  id="price_spike_resignal")
     scheduler.add_job(auto_trader_svc.stop_loss_monitor, "interval", seconds=60, id="stop_loss_monitor")
+    scheduler.add_job(rate_limiter.clear_expired, "interval", minutes=5, id="rate_limiter_cleanup")
     for hour, minute in [(4,0),(6,0),(8,0),(9,0)]:
         scheduler.add_job(pre_market_signal_job,
             CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone="America/New_York"),
@@ -240,9 +249,11 @@ async def lifespan(app: FastAPI):
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Signal Board API", version="2.3.0", lifespan=lifespan, redirect_slashes=False)
 
+app.add_middleware(MaintenanceModeMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 from routers import prices, news, signals, trader, alerts, chat, quote, watchlist, search, admin, portfolio
+from routers import metrics as metrics_router
 from routers import ondemand
 
 signals.signal_svc    = signal_svc
@@ -272,6 +283,7 @@ app.include_router(search.router,    prefix="/api/search",    tags=["search"])
 app.include_router(admin.router,     prefix="/api/admin",     tags=["admin"])
 app.include_router(ondemand.router,  prefix="/api/ondemand",  tags=["ondemand"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
+app.include_router(metrics_router.router, prefix="/api/metrics",   tags=["metrics"])
 
 @app.get("/api/market", tags=["market"])
 async def get_market_context():
