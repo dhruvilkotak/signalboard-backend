@@ -150,9 +150,20 @@ async def price_spike_job():
             except Exception:
                 pass
         try:
+            # 1. Regenerate scheduled signal with force
             result = await signal_svc.get_signal(symbol, force=True, session=session, trigger="price_spike")
             _spike_cooldown[symbol] = now.isoformat()
             logger.info(f"SPIKE: {symbol} {change_pct:+.1f}% → {result.get('signal')}/{result.get('confidence')}")
+
+            # 2. Invalidate ondemand cache so next user click gets fresh signal
+            ondemand_svc.invalidate(symbol)
+
+            # 3. Trigger auto-trader for this symbol if signal is actionable
+            if result.get("feed_eligible") and result.get("signal") in ("BUY", "SELL"):
+                spike_signals = {symbol: result}
+                await auto_trader_svc.run_for_all_users(spike_signals)
+                logger.info(f"SPIKE: auto-trader triggered for {symbol}")
+
         except Exception as e:
             logger.error(f"price_spike_job failed for {symbol}: {e}")
 
