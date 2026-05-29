@@ -95,3 +95,6 @@ class RateLimiter:
 
 # Global singleton — imported by routers
 limiter = RateLimiter()
+
+# Backward-compatible alias for routers expecting `rate_limiter`
+rate_limiter = limiter
