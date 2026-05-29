@@ -26,7 +26,6 @@ from config import settings
 from services.price_service import PriceService
 from services.news_service import NewsService
 from services.signal_service import SignalService
-from services.trader_service import TraderService
 from services.technical_service import TechnicalService
 from services.market_service import MarketService
 from services.ticker_service import TickerService
@@ -47,7 +46,6 @@ news_svc     = NewsService()
 tech_svc     = TechnicalService()
 market_svc   = MarketService()
 signal_svc   = SignalService(price_svc, news_svc, tech_svc, market_svc)
-trader_svc   = TraderService()
 ticker_svc   = TickerService()
 ondemand_svc = OnDemandSignalService(price_svc, news_svc)
 portfolio_svc    = PortfolioService()
@@ -114,7 +112,7 @@ async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: b
                     signal.get("confidence") in ("HIGH", "MEDIUM")):
                 price = prices.get(symbol, {}).get("price", 0)
                 if price > 0:
-                    result = trader_svc.execute_signal(symbol, signal, price)
+                    # Trade execution handled by auto_trader_svc.run_for_all_users() below
                     if result.get("status") == "executed":
                         trades += 1
                         logger.info(f"Trade: {symbol} {signal['signal']} @ ${price}")
@@ -267,15 +265,13 @@ app = FastAPI(title="Signal Board API", version="2.3.0", lifespan=lifespan, redi
 app.add_middleware(MaintenanceModeMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
-from routers import prices, news, signals, trader, alerts, chat, quote, watchlist, search, admin, portfolio
+from routers import prices, news, signals, alerts, chat, quote, watchlist, search, admin, portfolio
 from routers import metrics as metrics_router
 from routers import ondemand
 
 signals.signal_svc    = signal_svc
 signals.price_svc     = price_svc
-trader.trader_svc     = trader_svc
-trader.signal_svc     = signal_svc
-trader.price_svc      = price_svc
+
 chat.price_svc        = price_svc
 chat.news_svc         = news_svc
 prices.price_svc      = price_svc
@@ -289,7 +285,7 @@ portfolio.price_svc       = price_svc
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
 app.include_router(signals.router,   prefix="/api/signals",   tags=["signals"])
-app.include_router(trader.router,    prefix="/api/trader",    tags=["trader"])
+# /api/trader removed — replaced by /api/portfolio (v4)
 app.include_router(alerts.router,    prefix="/api/alerts",    tags=["alerts"])
 app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"])
 app.include_router(quote.router,     prefix="/api/quote",     tags=["quote"])
