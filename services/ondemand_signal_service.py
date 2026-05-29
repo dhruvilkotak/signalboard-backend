@@ -3,17 +3,57 @@ services/ondemand_signal_service.py
 
 On-demand signal service for Live Prices → AI Signal tab.
 Uses SignalEngine for identical signal generation as signal_service.py.
-Writes to Firestore signals_ondemand/{symbol} with 24h fixed TTL.
-Shared cache — one Claude call per ticker per 24h across ALL users.
+Writes to Firestore signals_ondemand/{symbol} with session-based TTL.
+Shared cache — one Claude call per ticker per session across ALL users.
+
+TTL strategy (session-based, not flat 24h):
+  pre_market  signal → expires when market opens  (9:30am ET)
+  market      signal → expires when market closes (4:00pm ET)
+  post_market signal → expires next pre-market    (4:00am ET next day)
+  closed      signal → expires next pre-market    (4:00am ET next day)
 """
 
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
-CACHE_TTL_HOURS = 24
+CACHE_TTL_HOURS = 24   # fallback only
+ET = ZoneInfo("America/New_York")
+
+
+def _session_expiry() -> datetime:
+    """
+    Return the UTC datetime when the current signal should expire.
+    Signals expire at the end of the current market session.
+    """
+    now_et = datetime.now(ET)
+    hour   = now_et.hour
+
+    if 4 <= hour < 9:
+        # Pre-market → expires at market open 9:30am ET today
+        exp_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    elif 9 <= hour < 16:
+        # Market hours → expires at close 4:00pm ET today
+        exp_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    elif 16 <= hour < 20:
+        # Post-market → expires at 4:00am ET next day (next pre-market)
+        exp_et = (now_et + timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+    else:
+        # Overnight closed → expires at 4:00am ET next day
+        exp_et = (now_et + timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
+
+    return exp_et.astimezone(timezone.utc)
+
+
+def _current_session() -> str:
+    hour = datetime.now(ET).hour
+    if 4  <= hour < 9:  return "pre_market"
+    if 9  <= hour < 16: return "market"
+    if 16 <= hour < 20: return "post_market"
+    return "closed"
 
 
 class OnDemandSignalService:
@@ -59,9 +99,12 @@ class OnDemandSignalService:
             logger.error(f"OnDemand generate failed for {symbol}: {e}")
             return self._fallback(symbol)
 
-        now = datetime.now(timezone.utc)
-        signal["expires_at"] = (now + timedelta(hours=CACHE_TTL_HOURS)).isoformat()
+        now    = datetime.now(timezone.utc)
+        exp    = _session_expiry()
+        signal["expires_at"] = exp.isoformat()
+        signal["session"]    = _current_session()
         signal["source"]     = "ondemand"
+        logger.info(f"OnDemand [{symbol}]: TTL until {exp.isoformat()} ({_current_session()})")
 
         self._cache[symbol] = signal
         await self._save_to_firestore(symbol, signal)
@@ -113,6 +156,13 @@ class OnDemandSignalService:
         except Exception:
             return False
 
+    def invalidate(self, symbol: str):
+        """Force-expire cache for symbol — called on price spike >2%."""
+        sym = symbol.upper().strip()
+        if sym in self._cache:
+            del self._cache[sym]
+            logger.info(f"OnDemand [{sym}]: cache invalidated (price spike)")
+
     def _fallback(self, symbol: str) -> dict:
         now = datetime.now(timezone.utc)
         return {
@@ -125,6 +175,6 @@ class OnDemandSignalService:
             "bull_case": "Insufficient data.", "bear_case": "Insufficient data.",
             "insider_trades": [], "sentiment": {},
             "generated_at": now.isoformat(),
-            "expires_at": (now + timedelta(hours=CACHE_TTL_HOURS)).isoformat(),
+            "expires_at": _session_expiry().isoformat(),
             "trigger": "fallback", "source": "ondemand", "feed_eligible": False,
         }

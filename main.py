@@ -206,6 +206,10 @@ async def lifespan(app: FastAPI):
         portfolio_svc.set_db(db)
         auto_trader_svc.set_db(db)
 
+        # Wire ticker_svc into watchlist router (for Firestore-based defaults)
+        from routers import watchlist as watchlist_router
+        watchlist_router.ticker_svc = ticker_svc
+
         # Wire services into metrics router
         metrics_router.signal_svc      = signal_svc
         metrics_router.portfolio_svc   = portfolio_svc
