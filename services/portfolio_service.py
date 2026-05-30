@@ -645,8 +645,11 @@ class PortfolioService:
             "buy_date":           now,    "current_price": price,
             "current_value":      cost,   "unrealized_pnl": 0.0,
             "unrealized_pnl_pct": 0.0,   "stop_loss_price": sl_price,
+            "stop_loss_pct":      strat.get("stop_loss_pct", cfg["stop_loss_default"]),
+            "trailing_high":      price,  # tracks peak price for trailing stop
             "signal_ref":         signal.get("generated_at", now),
             "signal_confidence":  signal.get("confidence", ""),
+            "target_price":       signal.get("target_price", 0),
         }
         await self._run(lambda: self._strat_pos_ref(uid, symbol, sk).set(position))
         new_cash_in = self._r2(cash_avail - cost)
@@ -718,23 +721,111 @@ class PortfolioService:
 
     # ── Stop-loss (strategies only) ───────────────────────────────────────────
 
-    async def check_stop_losses(self, uid: str, prices: dict) -> list[dict]:
+    async def check_stop_losses(self, uid: str, prices: dict,
+                                signals: dict = None) -> list[dict]:
+        """
+        3-priority sell logic — runs every 60 seconds:
+
+        Priority 1 — SELL signal (HIGH confidence)
+            AI says exit → sell immediately regardless of price
+
+        Priority 2 — Trailing stop breached
+            Price fell X% from peak → sell to protect gains
+            trailing_high tracks peak price since entry
+            stop_loss_price updates upward as price rises (never down)
+
+        Priority 3 — Hard stop-loss
+            Price fell X% from buy_price → last resort, limits losses
+        """
         triggered = []
+        signals   = signals or {}
+
         for pos in await self.get_all_strategy_positions(uid):
             symbol = pos["symbol"]
             sk     = pos.get("strategy_key", "")
-            curr   = prices.get(symbol)
-            stop   = pos.get("stop_loss_price")
-            if not curr or not stop or not sk:
+            if not symbol or not sk:
                 continue
+
+            # Get current price
+            price_data = prices.get(symbol)
+            curr = (price_data.get("price") if isinstance(price_data, dict)
+                    else price_data) if price_data else None
+            if not curr or curr <= 0:
+                continue
+
+            # Skip paused strategies
             strat = await self.get_strategy(uid, sk)
-            if strat and strat.get("is_paused"):
+            if not strat or strat.get("is_paused"):
                 continue
-            if curr <= stop:
-                reason = f"Stop-loss triggered: ${curr:.2f} ≤ ${stop:.2f} ({pos.get('unrealized_pnl_pct', 0):+.2f}%)"
-                result = await self.strategy_sell(uid, symbol, sk, curr, {},
-                                                  trigger="stop_loss", reason=reason)
-                triggered.append(result)
+
+            cfg          = STRATEGIES.get(sk, {})
+            sl_pct       = pos.get("stop_loss_pct", cfg.get("stop_loss_default", 5.0))
+            buy_price    = pos.get("buy_price", 0)
+            hard_stop    = pos.get("stop_loss_price", buy_price * (1 - sl_pct / 100))
+            trailing_high= pos.get("trailing_high", buy_price)
+            sell_reason  = None
+            sell_trigger = None
+
+            # ── Priority 1: SELL signal ───────────────────────────────────────
+            sig = signals.get(symbol, {})
+            eff_signal = sig.get("current_signal") or sig.get("signal", "")
+            eff_conf   = sig.get("current_confidence") or sig.get("confidence", "")
+            if eff_signal == "SELL" and eff_conf == "HIGH":
+                sell_reason  = f"SELL signal (HIGH): AI recommends exit at ${curr:.2f}"
+                sell_trigger = "sell_signal"
+
+            # ── Priority 2: Trailing stop ────────────────────────────────────
+            elif curr > 0:
+                new_trailing_high = max(curr, trailing_high)
+                trailing_stop     = self._r2(new_trailing_high * (1 - sl_pct / 100))
+
+                if curr <= trailing_stop and curr > hard_stop:
+                    pnl_pct = ((curr - buy_price) / buy_price * 100) if buy_price else 0
+                    sell_reason  = (
+                        f"Trailing stop: ${curr:.2f} ≤ ${trailing_stop:.2f} "
+                        f"(peak ${new_trailing_high:.2f}, {pnl_pct:+.2f}%)"
+                    )
+                    sell_trigger = "trailing_stop"
+
+                # ── Priority 3: Hard stop-loss ───────────────────────────────
+                elif curr <= hard_stop:
+                    pnl_pct = ((curr - buy_price) / buy_price * 100) if buy_price else 0
+                    sell_reason  = (
+                        f"Hard stop-loss: ${curr:.2f} ≤ ${hard_stop:.2f} "
+                        f"(bought ${buy_price:.2f}, {pnl_pct:+.2f}%)"
+                    )
+                    sell_trigger = "hard_stop"
+
+                # ── No sell: update trailing high + stop if price rose ────────
+                elif new_trailing_high > trailing_high:
+                    new_stop = self._r2(new_trailing_high * (1 - sl_pct / 100))
+                    try:
+                        await self._run(lambda: self._strat_pos_ref(uid, symbol, sk).update({
+                            "trailing_high":  new_trailing_high,
+                            "stop_loss_price": new_stop,
+                            "current_price":  curr,
+                        }))
+                        logger.debug(
+                            f"Trailing high updated {symbol}/{sk}: "
+                            f"${trailing_high:.2f}→${new_trailing_high:.2f} "
+                            f"stop ${new_stop:.2f}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to update trailing high for {symbol}: {e}")
+
+            # ── Execute sell if any priority triggered ────────────────────────
+            if sell_reason and sell_trigger:
+                result = await self.strategy_sell(
+                    uid, symbol, sk, curr, {},
+                    trigger=sell_trigger, reason=sell_reason
+                )
+                if result.get("status") == "executed":
+                    triggered.append({**result, "sell_trigger": sell_trigger})
+                    logger.info(
+                        f"PortfolioService: SELL {sell_trigger.upper()} "
+                        f"{symbol}/{sk} @ ${curr:.2f} — {sell_reason}"
+                    )
+
         return triggered
 
     # ── Active users (for scheduler) ─────────────────────────────────────────

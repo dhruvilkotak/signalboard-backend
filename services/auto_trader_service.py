@@ -114,27 +114,47 @@ class AutoTraderService:
         return counts
 
     async def stop_loss_monitor(self) -> dict:
+        """
+        Runs every 60s. Checks all active strategy positions.
+        Passes cached signals so Priority 1 (SELL signal) triggers correctly.
+        """
         if not await self._is_enabled(): return {"skipped": True}
         pairs = await self.portfolio_svc.get_active_strategy_users()
         if not pairs: return {"triggered": 0}
         uids = list(set(uid for uid, _ in pairs))
+
         try:
             raw    = await self.price_svc.get_all()
-            prices = {s: (d.get("price", 0) if isinstance(d, dict) else float(d or 0)) for s, d in raw.items()}
+            prices = {s: (d.get("price", 0) if isinstance(d, dict) else float(d or 0))
+                      for s, d in raw.items()}
         except Exception as e:
             return {"error": str(e)}
+
+        # Get cached signals for Priority 1 (SELL signal check)
+        signals = {}
+        if self.signal_svc:
+            try:
+                signals = self.signal_svc.get_all_cached()
+            except Exception:
+                pass
+
         total = 0
         sem   = asyncio.Semaphore(10)
         async def _check(uid):
             nonlocal total
             async with sem:
                 try:
-                    t = await self.portfolio_svc.check_stop_losses(uid, prices)
+                    t = await self.portfolio_svc.check_stop_losses(
+                        uid, prices, signals=signals
+                    )
                     total += len(t)
                 except Exception as e:
                     logger.error(f"Stop-loss check failed for {uid}: {e}")
+
         await asyncio.gather(*[_check(uid) for uid in uids])
         for _ in range(total): _metrics_increment("stop_losses_today")
+        if total:
+            logger.info(f"stop_loss_monitor: {total} positions closed")
         return {"triggered": total, "users_checked": len(uids)}
 
     async def rebalance_strategy(self, uid, sk, new_symbol, new_signal, prices) -> bool:
