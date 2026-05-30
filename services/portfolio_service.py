@@ -762,7 +762,22 @@ class PortfolioService:
             sl_pct       = pos.get("stop_loss_pct", cfg.get("stop_loss_default", 5.0))
             buy_price    = pos.get("buy_price", 0)
             hard_stop    = pos.get("stop_loss_price", buy_price * (1 - sl_pct / 100))
-            trailing_high= pos.get("trailing_high", buy_price)
+            # If trailing_high missing (old position), initialize to max of
+            # current price and buy price — backfills existing positions correctly
+            stored_high  = pos.get("trailing_high")
+            trailing_high = stored_high if stored_high else max(curr, buy_price)
+
+            if not stored_high:
+                # Backfill Firestore so next run uses correct trailing_high
+                try:
+                    await self._run(lambda: self._strat_pos_ref(uid, symbol, sk).update({
+                        "trailing_high": trailing_high,
+                        "stop_loss_pct": sl_pct,
+                    }))
+                    logger.info(f"Backfilled trailing_high={trailing_high} for {symbol}/{sk}")
+                except Exception as e:
+                    logger.warning(f"Failed to backfill trailing_high for {symbol}: {e}")
+
             sell_reason  = None
             sell_trigger = None
 
