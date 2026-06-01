@@ -144,10 +144,21 @@ class SignalService:
             loop = asyncio.get_running_loop()
             ref = self._db.collection("signals").document(symbol)
 
+            new_signal = (signal.get("signal")     or "HOLD").upper()
+            new_conf   = (signal.get("confidence") or "LOW").upper()
+
+            # Only persist HIGH confidence BUY/SELL signals to Firestore.
+            # MEDIUM/LOW signals stay in memory cache only (30 min TTL).
+            # This prevents MEDIUM/LOW from overwriting a valid HIGH signal.
+            if new_conf != "HIGH" or new_signal not in ("BUY", "SELL"):
+                logger.info(
+                    f"SignalService: skipping Firestore write for {symbol} "
+                    f"{new_signal} {new_conf} — only HIGH BUY/SELL persisted"
+                )
+                return
+
             doc = await loop.run_in_executor(None, ref.get)
             existing = doc.to_dict() if doc.exists else None
-
-            new_signal = (signal.get("signal") or "HOLD").upper()
 
             # Rule: if no existing signal and new one is HOLD, ignore it.
             if not existing and new_signal == "HOLD":
