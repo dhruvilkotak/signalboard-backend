@@ -102,24 +102,35 @@ async def get_signal_feed(
         cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days if not show_all else 45)).isoformat()
 
         def _query():
-            q = db.collection("signals")
-            q = q.where("feed_eligible", "==", True)
-            if confidence != "ALL":
-                q = q.where("confidence", "==", confidence)
-            q = q.where("generated_at", ">", cutoff)
-
-            docs = q.stream()
+            # Single where clause — no composite index needed
+            # All filtering done in Python after fetch
+            docs = db.collection("signals").stream()
             results = []
 
             for doc in docs:
                 d = doc.to_dict() or {}
                 d["snapshot_doc_id"] = doc.id
-                d["symbol"] = doc.id
+                d["symbol"]          = doc.id
 
+                # Filter: BUY or SELL only
                 if d.get("signal") not in ("BUY", "SELL"):
                     continue
 
+                # Filter: not a fallback trigger
                 if d.get("trigger") == "fallback":
+                    continue
+
+                # Filter: feed_eligible
+                if not d.get("feed_eligible"):
+                    continue
+
+                # Filter: confidence
+                if confidence != "ALL" and d.get("confidence") != confidence:
+                    continue
+
+                # Filter: cutoff (within last N days)
+                gen = d.get("generated_at", "")
+                if gen and not show_all and gen < cutoff:
                     continue
 
                 results.append(_ser(d))
