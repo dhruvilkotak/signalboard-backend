@@ -559,9 +559,11 @@ class PortfolioService:
     async def get_strategy_positions(self, uid: str, sk: str,
                                      prices: dict = None) -> list[dict]:
         def _f():
-            return [self._ser(d.to_dict() or {}) for d in
-                    self._user(uid).collection("strategy_positions")
-                    .where("strategy_key", "==", sk).stream()]
+            # Single where clause — no composite index needed
+            docs = self._user(uid).collection("strategy_positions").stream()
+            return [self._ser(d.to_dict() or {})
+                    for d in docs
+                    if (d.to_dict() or {}).get("strategy_key") == sk]
         positions = await self._run(_f)
         if prices:
             for pos in positions:
@@ -869,11 +871,15 @@ class PortfolioService:
                                   limit: int = 50) -> list[dict]:
         from firebase_admin import firestore as fs
         def _f():
-            q = self._strat_trades_ref(uid).order_by(
-                "timestamp", direction=fs.Query.DESCENDING)
+            # Stream all trades then filter in Python — avoids composite index
+            docs = (self._strat_trades_ref(uid)
+                    .order_by("timestamp", direction=fs.Query.DESCENDING)
+                    .limit(limit * 3 if sk else limit)  # fetch more if filtering
+                    .stream())
+            trades = [self._ser(d.to_dict() or {}) for d in docs]
             if sk:
-                q = q.where("strategy_key", "==", sk)
-            return [self._ser(d.to_dict() or {}) for d in q.limit(limit).stream()]
+                trades = [t for t in trades if t.get("strategy_key") == sk]
+            return trades[:limit]
         return await self._run(_f)
 
     async def get_transactions(self, uid: str, limit: int = 50) -> list[dict]:
