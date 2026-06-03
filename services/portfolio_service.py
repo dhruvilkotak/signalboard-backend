@@ -43,7 +43,7 @@ STRATEGIES: dict[str, dict] = {
         "stop_loss_default": 8.0,
         "stop_loss_min":     6.0,
         "stop_loss_max":     10.0,
-        "universe":          ["NVDA","META","AMZN","GOOGL","HOOD","TSLA","AMD","PLTR"],
+        "universe":          ["NVDA","META","AMZN","GOOGL","HOOD","TSLA","AMD","PLTR","CRWD","APP","COIN"],
         "cash_reserve_pct":  0.0,
     },
     "balanced": {
@@ -67,7 +67,7 @@ STRATEGIES: dict[str, dict] = {
         "stop_loss_default": 7.0,
         "stop_loss_min":     5.0,
         "stop_loss_max":     9.0,
-        "universe":          ["NVDA","MSFT","AAPL","GOOGL","META","AMZN","AMD"],
+        "universe":          ["NVDA","MSFT","AAPL","GOOGL","META","AMZN","AMD","CRWD","AVGO","ORCL","NFLX"],
         "cash_reserve_pct":  0.0,
     },
     "income": {
