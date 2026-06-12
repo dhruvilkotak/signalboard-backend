@@ -21,7 +21,7 @@ from services.firebase_service import get_db
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-WATCHLIST_LIMIT = 25
+WATCHLIST_LIMIT = 50
 
 # Injected by main.py after ticker_svc is initialised
 ticker_svc = None
