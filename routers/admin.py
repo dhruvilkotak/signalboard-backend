@@ -19,7 +19,7 @@ class ApproveRequest(BaseModel):
 
 @router.post("/approve")
 async def approve_user(req: ApproveRequest, admin=Depends(require_admin)):
-    """Approve a pending user and send approval email."""
+    """Approve a pending user, seed their watchlist, and send approval email."""
     db = get_db()
     if not db:
         raise HTTPException(500, "Database not available")
@@ -34,6 +34,13 @@ async def approve_user(req: ApproveRequest, admin=Depends(require_admin)):
     except Exception as e:
         logger.error(f"Firestore update failed for {req.uid}: {e}")
         raise HTTPException(500, f"Failed to update user: {e}")
+
+    # Seed default watchlist for the newly approved user
+    try:
+        from routers.watchlist import seed_watchlist_for_user
+        seed_watchlist_for_user(req.uid)
+    except Exception as e:
+        logger.warning(f"Watchlist seed failed for {req.uid}: {e} — user can still add stocks manually")
 
     # Send approval email
     email_sent = await send_approval_email(req.email, req.name)

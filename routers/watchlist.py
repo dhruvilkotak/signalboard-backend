@@ -1,9 +1,10 @@
 """
-routers/watchlist.py — v2
+routers/watchlist.py — v3
 
 Per-user watchlist stored in Firestore.
-Default symbols seeded from TickerService (Firestore config/signal_tickers).
-Limit: 25 symbols total (Option A — includes admin default tickers).
+Default symbols are seeded once at user approval time (via admin.py).
+This router never falls back to defaults — it only reads/writes what's in Firestore.
+Limit: 25 symbols total.
 
 Firestore:
     users/{uid}/data/watchlist → { symbols: [...], updated_at }
@@ -20,7 +21,7 @@ from services.firebase_service import get_db
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-WATCHLIST_LIMIT = 25  # total symbols including admin defaults
+WATCHLIST_LIMIT = 25
 
 # Injected by main.py after ticker_svc is initialised
 ticker_svc = None
@@ -33,29 +34,36 @@ def _watchlist_ref(uid: str):
     return get_db().collection("users").document(uid).collection("data").document("watchlist")
 
 
-def _default_tickers() -> list[str]:
-    """Get default tickers from TickerService (Firestore) or fallback to config."""
+def get_default_tickers() -> list[str]:
+    """Get default tickers from TickerService (Firestore) or fallback to config.
+    Called only at approval time — never during normal watchlist reads.
+    """
     if ticker_svc:
         tickers = ticker_svc.get_tickers()
         if tickers:
             return tickers
-    # Fallback to config if ticker_svc not available
     from config import settings
     return list(settings.TICKERS)
 
 
+def seed_watchlist_for_user(uid: str) -> list[str]:
+    """Write default tickers to Firestore for a newly approved user.
+    Called once from approve_user in admin.py. Returns the seeded list.
+    """
+    defaults = get_default_tickers()
+    _watchlist_ref(uid).set({"symbols": defaults, "updated_at": fs.SERVER_TIMESTAMP})
+    logger.info(f"Watchlist: {uid[:8]}… seeded with {len(defaults)} defaults at approval")
+    return defaults
+
+
 @router.get("/")
 async def get_watchlist(user: dict = Depends(get_current_user)):
-    """Return user's watchlist. Seeds from Firestore config on first visit."""
+    """Return user's watchlist. Returns empty list if not seeded yet."""
     uid = user["uid"]
     try:
         doc = _watchlist_ref(uid).get()
-        if doc.exists:
-            return {"symbols": doc.to_dict().get("symbols", []),
-                    "limit": WATCHLIST_LIMIT}
-        # First visit — seed with admin tickers from Firestore
-        defaults = _default_tickers()
-        return {"symbols": defaults, "limit": WATCHLIST_LIMIT}
+        symbols = doc.to_dict().get("symbols", []) if doc.exists else []
+        return {"symbols": symbols, "limit": WATCHLIST_LIMIT}
     except Exception as e:
         logger.error(f"get_watchlist failed for {uid}: {e}")
         raise HTTPException(500, "Failed to fetch watchlist")
@@ -67,7 +75,6 @@ async def add_symbol(symbol: str, user: dict = Depends(get_current_user)):
     uid    = user["uid"]
     symbol = symbol.upper().strip()
 
-    # Validate symbol format
     if not SYMBOL_RE.match(symbol):
         raise HTTPException(400, {
             "error":   "invalid_symbol",
@@ -77,13 +84,11 @@ async def add_symbol(symbol: str, user: dict = Depends(get_current_user)):
     try:
         ref     = _watchlist_ref(uid)
         doc     = ref.get()
-        symbols = doc.to_dict().get("symbols", _default_tickers()) if doc.exists else _default_tickers()
+        symbols = doc.to_dict().get("symbols", []) if doc.exists else []
 
-        # Already in watchlist
         if symbol in symbols:
             return {"symbols": symbols, "added": symbol, "limit": WATCHLIST_LIMIT}
 
-        # Enforce limit
         if len(symbols) >= WATCHLIST_LIMIT:
             raise HTTPException(400, {
                 "error":   "watchlist_limit",
