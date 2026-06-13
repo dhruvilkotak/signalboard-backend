@@ -113,7 +113,6 @@ async def get_summary(user=Depends(get_current_user)):
     _need_portfolio()
     uid = user["uid"]
     try:
-        # Sync total_value first so header always shows correct value on reload
         await portfolio_svc._sync_total_value(uid)
         return await portfolio_svc.get_or_create_summary(uid)
     except Exception as e:
@@ -167,7 +166,11 @@ async def get_manual_trades(user=Depends(get_current_user), limit: int = Query(5
 
 @router.post("/manual/buy")
 async def manual_buy(req: ManualBuyRequest, user=Depends(get_current_user)):
-    """Buy stock from available cash. No strategy needed."""
+    """Buy stock from available cash. Blocked outside market hours (7:30 AM – 6:00 PM ET, Mon–Fri)."""
+    # ── CHANGE 3: market hours gate ──────────────────────────────────────────
+    from utils.market_hours import assert_market_open
+    assert_market_open("Manual trading")
+    # ─────────────────────────────────────────────────────────────────────────
     _need_auto_trader()
     uid = user["uid"]
     logger.info(f"[portfolio] POST /manual/buy uid={uid[:8]}… symbol={req.symbol} amount={req.amount_usd} shares={req.shares}")
@@ -195,7 +198,11 @@ async def manual_buy(req: ManualBuyRequest, user=Depends(get_current_user)):
 
 @router.post("/manual/sell")
 async def manual_sell(req: ManualSellRequest, user=Depends(get_current_user)):
-    """Sell manual position. shares=None sells entire position."""
+    """Sell manual position. shares=None sells entire position. Blocked outside market hours."""
+    # ── CHANGE 3: market hours gate ──────────────────────────────────────────
+    from utils.market_hours import assert_market_open
+    assert_market_open("Manual trading")
+    # ─────────────────────────────────────────────────────────────────────────
     _need_auto_trader()
     uid = user["uid"]
     if not req.symbol.strip():

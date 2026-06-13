@@ -23,6 +23,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import settings
+from utils.market_hours import get_current_session, get_market_status
 from services.price_service import PriceService
 from services.news_service import NewsService
 from services.signal_service import SignalService
@@ -59,22 +60,14 @@ scheduler    = AsyncIOScheduler(timezone="America/New_York")
 signal_svc.set_engine(engine)
 ondemand_svc.set_engine(engine)
 
-# ── Session ───────────────────────────────────────────────────────────────────
+# ── CHANGE 1 (cont): SESSIONS kept for /api/session label lookup only ─────────
 SESSIONS = {
-    "pre_market":  {"start": 4,  "end": 9,  "label": "Pre-Market"},
-    "market":      {"start": 9,  "end": 16, "label": "Market Hours"},
-    "post_market": {"start": 16, "end": 20, "label": "Post-Market"},
+    "pre_market":  {"label": "Pre-Market"},
+    "market":      {"label": "Market Hours"},
+    "post_market": {"label": "Post-Market"},
+    "closed":      {"label": "Closed"},
 }
-
-def get_current_session() -> str:
-    now_est = datetime.now(timezone.utc).astimezone(
-        __import__("zoneinfo").ZoneInfo("America/New_York")
-    )
-    hour = now_est.hour
-    if 4 <= hour < 9:   return "pre_market"
-    if 9 <= hour < 16:  return "market"
-    if 16 <= hour < 20: return "post_market"
-    return "closed"
+# get_current_session() is now imported from utils.market_hours — no inline def needed
 
 # ── Signal runner ─────────────────────────────────────────────────────────────
 async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: bool = False) -> dict:
@@ -88,8 +81,6 @@ async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: b
             return sym, await signal_svc.get_signal(sym, force=force, session=session, trigger="scheduled")
 
     results = await asyncio.gather(*[_one(t) for t in tickers], return_exceptions=True)
-    # Deduplicate by symbol — keep freshest generated_at (same ticker may run
-    # across multiple sessions: pre/market/post, producing multiple results)
     raw_signals = [r for r in results if not isinstance(r, Exception)]
     deduped: dict = {}
     for sym, sig in raw_signals:
@@ -112,7 +103,6 @@ async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: b
                     signal.get("confidence") in ("HIGH", "MEDIUM")):
                 price = prices.get(symbol, {}).get("price", 0)
                 if price > 0:
-                    # Trade execution handled by auto_trader_svc.run_for_all_users() below
                     if result.get("status") == "executed":
                         trades += 1
                         logger.info(f"Trade: {symbol} {signal['signal']} @ ${price}")
@@ -148,20 +138,14 @@ async def price_spike_job():
             except Exception:
                 pass
         try:
-            # 1. Regenerate scheduled signal with force
             result = await signal_svc.get_signal(symbol, force=True, session=session, trigger="price_spike")
             _spike_cooldown[symbol] = now.isoformat()
             logger.info(f"SPIKE: {symbol} {change_pct:+.1f}% → {result.get('signal')}/{result.get('confidence')}")
-
-            # 2. Invalidate ondemand cache so next user click gets fresh signal
             ondemand_svc.invalidate(symbol)
-
-            # 3. Trigger auto-trader for this symbol if signal is actionable
             if result.get("feed_eligible") and result.get("signal") in ("BUY", "SELL"):
                 spike_signals = {symbol: result}
                 await auto_trader_svc.run_for_all_users(spike_signals)
                 logger.info(f"SPIKE: auto-trader triggered for {symbol}")
-
         except Exception as e:
             logger.error(f"price_spike_job failed for {symbol}: {e}")
 
@@ -179,8 +163,8 @@ async def market_hours_signal_job():
     logger.info("=== MARKET HOURS signal job ===")
     try:
         await price_svc.update_cache()
-        signals = await run_signals_for_admin_tickers("market", force=False, auto_trade=False)  # ← False: stops Alpaca trades
-        await auto_trader_svc.run_for_all_users(signals)   # ← new: runs per-user Firestore trades
+        signals = await run_signals_for_admin_tickers("market", force=False, auto_trade=False)
+        await auto_trader_svc.run_for_all_users(signals)
     except Exception as e:
         logger.error(f"Market hours job failed: {e}")
 
@@ -214,15 +198,9 @@ async def lifespan(app: FastAPI):
         ondemand_svc.set_db(db)
         portfolio_svc.set_db(db)
         auto_trader_svc.set_db(db)
-
-        # Wire signal_svc into auto_trader for Priority 1 SELL signal check
         auto_trader_svc.signal_svc = signal_svc
-
-        # Wire ticker_svc into watchlist router (for Firestore-based defaults)
         from routers import watchlist as watchlist_router
         watchlist_router.ticker_svc = ticker_svc
-
-        # Wire services into metrics router
         metrics_router.signal_svc      = signal_svc
         metrics_router.portfolio_svc   = portfolio_svc
         metrics_router.auto_trader_svc = auto_trader_svc
@@ -243,12 +221,10 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(pre_market_signal_job,
             CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone="America/New_York"),
             id=f"pre_market_{hour}_{minute}")
-
     for hour, minute in [(9,30),(11,0),(13,0),(14,30),(15,30)]:
         scheduler.add_job(market_hours_signal_job,
             CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone="America/New_York"),
             id=f"market_{hour}_{minute}")
-
     for hour, minute in [(16,15),(17,30),(19,0)]:
         scheduler.add_job(post_market_signal_job,
             CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone="America/New_York"),
@@ -257,7 +233,6 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     await news_svc.fetch_and_cache()
     await price_svc.update_cache()
-
     logger.info(f"Scheduler: {len(scheduler.get_jobs())} jobs — Signal Board v2.3 ready ✓")
     yield
     scheduler.shutdown()
@@ -274,7 +249,6 @@ from routers import ondemand
 
 signals.signal_svc    = signal_svc
 signals.price_svc     = price_svc
-
 chat.price_svc        = price_svc
 chat.news_svc         = news_svc
 prices.price_svc      = price_svc
@@ -288,7 +262,6 @@ portfolio.price_svc       = price_svc
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
 app.include_router(signals.router,   prefix="/api/signals",   tags=["signals"])
-# /api/trader removed — replaced by /api/portfolio (v4)
 app.include_router(alerts.router,    prefix="/api/alerts",    tags=["alerts"])
 app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"])
 app.include_router(quote.router,     prefix="/api/quote",     tags=["quote"])
@@ -297,16 +270,22 @@ app.include_router(search.router,    prefix="/api/search",    tags=["search"])
 app.include_router(admin.router,     prefix="/api/admin",     tags=["admin"])
 app.include_router(ondemand.router,  prefix="/api/ondemand",  tags=["ondemand"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
-app.include_router(metrics_router.router, prefix="/api/metrics",   tags=["metrics"])
+app.include_router(metrics_router.router, prefix="/api/metrics", tags=["metrics"])
 
 @app.get("/api/market", tags=["market"])
 async def get_market_context():
     return await market_svc.get_market_context(settings.TICKERS)
 
+# ── CHANGE 2: new endpoint — polled by frontend every 60s ────────────────────
+@app.get("/api/market/status", tags=["market"])
+async def market_status_endpoint():
+    """Current session + trading window. Frontend polls every 60s."""
+    return get_market_status()
+
 @app.get("/api/session", tags=["market"])
 async def get_session():
-    session  = get_current_session()
-    jobs     = scheduler.get_jobs()
+    session   = get_current_session()
+    jobs      = scheduler.get_jobs()
     next_jobs = sorted(
         [{"id": j.id, "next_run": str(j.next_run_time)} for j in jobs if j.next_run_time],
         key=lambda x: x["next_run"]
@@ -345,7 +324,7 @@ async def websocket_prices(websocket: WebSocket):
         mgr.disconnect(websocket)
 
 @app.get("/health")
-async def health():                          # ← add async here
+async def health():
     return {
         "status": "ok", "version": "2.3.0",
         "current_session": get_current_session(),
@@ -360,7 +339,7 @@ async def health():                          # ← add async here
             "ticker_refresh": "Every 60 min",
             "spike_resignal": "Every 30s (>2% move, 30-min cooldown)",
         },
-        "tickers":   ticker_svc.status(),
+        "tickers":    ticker_svc.status(),
         "auto_trader": await auto_trader_svc.get_status() if auto_trader_svc else {"enabled": True},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp":  datetime.now(timezone.utc).isoformat(),
     }
