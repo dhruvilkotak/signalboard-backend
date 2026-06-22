@@ -95,6 +95,13 @@ class SignalService:
     def invalidate(self, symbol: str):
         self._cache.pop(symbol.upper(), None)
 
+    def invalidate_all(self) -> int:
+        """Clear entire in-memory signal cache. Admin use only."""
+        count = len(self._cache)
+        self._cache.clear()
+        logger.info(f"SignalService: full cache cleared ({count} symbols)")
+        return count
+
     # ── Generation ────────────────────────────────────────────────────────────
 
     async def _generate(self, symbol: str, session: str, trigger: str) -> dict:

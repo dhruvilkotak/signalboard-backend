@@ -364,13 +364,91 @@ async def get_session():
     )[:3]
     return {"current_session": session, "session_label": SESSIONS.get(session, {}).get("label", "Closed"), "next_scheduled_runs": next_jobs, "timestamp": datetime.now(timezone.utc).isoformat()}
 
+# ── Signal job state — in-memory, reset on restart ───────────────────────────
+_signal_job: dict = {
+    "status":       "idle",        # idle | running | complete | failed
+    "started_at":   None,
+    "completed_at": None,
+    "session":      None,
+    "triggered_by": None,
+    "result": {
+        "total": 0, "buy": 0, "sell": 0, "hold": 0,
+        "high": 0, "medium": 0, "low": 0,
+        "written": 0, "skipped": 0, "feed_eligible": 0,
+        "failed_count": 0, "failed_symbols": [],
+        "duration_ms": 0,
+    },
+    "error": None,
+}
+
+async def _run_signal_job_async(session: str, triggered_by: str):
+    """Fire-and-forget: runs signal job in background, updates _signal_job state."""
+    global _signal_job
+    _signal_job["status"]       = "running"
+    _signal_job["started_at"]   = datetime.now(timezone.utc).isoformat()
+    _signal_job["completed_at"] = None
+    _signal_job["session"]      = session
+    _signal_job["triggered_by"] = triggered_by
+    _signal_job["error"]        = None
+
+    log_event(logger, "info", "Signal job triggered manually",
+              event="signal_job_triggered", session=session, triggered_by=triggered_by)
+    try:
+        signals = await run_signals_for_admin_tickers(session, force=True, auto_trade=False)
+
+        buy    = sum(1 for s in signals.values() if s.get("signal") == "BUY")
+        sell   = sum(1 for s in signals.values() if s.get("signal") == "SELL")
+        hold   = sum(1 for s in signals.values() if s.get("signal") == "HOLD")
+        high   = sum(1 for s in signals.values() if s.get("confidence") == "HIGH")
+        medium = sum(1 for s in signals.values() if s.get("confidence") == "MEDIUM")
+        low    = sum(1 for s in signals.values() if s.get("confidence") == "LOW")
+        written= sum(1 for s in signals.values()
+                     if s.get("confidence") == "HIGH" and s.get("signal") in ("BUY", "SELL"))
+        feed   = sum(1 for s in signals.values() if s.get("feed_eligible"))
+
+        _signal_job["status"]       = "complete"
+        _signal_job["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _signal_job["result"]       = {
+            "total": len(signals), "buy": buy, "sell": sell, "hold": hold,
+            "high": high, "medium": medium, "low": low,
+            "written": written, "skipped": len(signals) - written,
+            "feed_eligible": feed, "failed_count": 0, "failed_symbols": [],
+        }
+    except Exception as e:
+        _signal_job["status"]       = "failed"
+        _signal_job["completed_at"] = datetime.now(timezone.utc).isoformat()
+        _signal_job["error"]        = str(e)
+        log_event(logger, "error", f"Signal job failed: {e}",
+                  event="signal_job_failed", session=session, error=str(e))
+
 @app.post("/api/signals/run-all", tags=["signals"])
 async def trigger_all_signals(admin=Depends(require_admin)):
-    """Admin-only: force regenerate signals for all admin tickers."""
-    session      = get_current_session()
-    signals_data = await run_signals_for_admin_tickers(session, force=True, auto_trade=False)
-    feed_count   = sum(1 for s in signals_data.values() if s.get("feed_eligible"))
-    return {"signals": signals_data, "session": session, "count": len(signals_data), "feed_eligible_count": feed_count}
+    """
+    Admin-only: fire signal job in background and return immediately.
+    Poll GET /api/signals/job-status to track progress.
+    """
+    global _signal_job
+    if _signal_job["status"] == "running":
+        return {
+            "status":    "already_running",
+            "started_at": _signal_job["started_at"],
+            "message":   "Signal job is already running — check /api/signals/job-status",
+        }
+    session = get_current_session()
+    asyncio.create_task(_run_signal_job_async(session, triggered_by=admin["uid"]))
+    return {
+        "status":  "started",
+        "session": session,
+        "message": "Signal job started in background. Poll /api/signals/job-status for progress.",
+    }
+
+@app.get("/api/signals/job-status", tags=["signals"])
+async def get_signal_job_status(admin=Depends(require_admin)):
+    """Admin-only: returns current signal job state."""
+    return {
+        "job":       _signal_job,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 @app.websocket("/ws/prices")
 async def websocket_prices(websocket: WebSocket):

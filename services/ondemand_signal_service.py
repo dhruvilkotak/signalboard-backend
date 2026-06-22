@@ -163,6 +163,13 @@ class OnDemandSignalService:
             del self._cache[sym]
             logger.info(f"OnDemand [{sym}]: cache invalidated (price spike)")
 
+    def invalidate_all(self) -> int:
+        """Clear entire in-memory ondemand cache. Admin use only."""
+        count = len(self._cache)
+        self._cache.clear()
+        logger.info(f"OnDemand: full cache cleared ({count} symbols)")
+        return count
+
     def _fallback(self, symbol: str) -> dict:
         now = datetime.now(timezone.utc)
         return {
