@@ -75,6 +75,7 @@ SESSIONS = {
 # ── Signal runner ─────────────────────────────────────────────────────────────
 async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: bool = False) -> dict:
     import time
+    start   = time.monotonic()
     tickers = ticker_svc.get_tickers()
     logger.info(f"[{session}] Running signals for {len(tickers)} tickers: {tickers}")
 
@@ -84,8 +85,10 @@ async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: b
         async with sem:
             return sym, await signal_svc.get_signal(sym, force=force, session=session, trigger="scheduled")
 
-    results = await asyncio.gather(*[_one(t) for t in tickers], return_exceptions=True)
-    raw_signals = [r for r in results if not isinstance(r, Exception)]
+    results     = await asyncio.gather(*[_one(t) for t in tickers], return_exceptions=True)
+    failed_syms = [tickers[i] for i, r in enumerate(results) if isinstance(r, Exception)]
+    raw_signals = [(sym, sig) for sym, sig in [r for r in results if not isinstance(r, Exception)]]
+
     deduped: dict = {}
     for sym, sig in raw_signals:
         existing = deduped.get(sym)
@@ -93,17 +96,52 @@ async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: b
             deduped[sym] = sig
     signals = deduped
 
+    # ── Direction counts ───────────────────────────────────────────────────
     buy  = sum(1 for s in signals.values() if s.get("signal") == "BUY")
     sell = sum(1 for s in signals.values() if s.get("signal") == "SELL")
     hold = sum(1 for s in signals.values() if s.get("signal") == "HOLD")
     feed = sum(1 for s in signals.values() if s.get("feed_eligible"))
+
+    # ── Confidence counts ──────────────────────────────────────────────────
+    high   = sum(1 for s in signals.values() if s.get("confidence") == "HIGH")
+    medium = sum(1 for s in signals.values() if s.get("confidence") == "MEDIUM")
+    low    = sum(1 for s in signals.values() if s.get("confidence") == "LOW")
+
+    # ── Firestore write counts ─────────────────────────────────────────────
+    # Only HIGH BUY/SELL get written — everything else is skipped
+    written = sum(1 for s in signals.values()
+                  if s.get("confidence") == "HIGH" and s.get("signal") in ("BUY", "SELL"))
+    skipped = len(signals) - written
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+
     logger.info(f"[{session}] {buy} BUY / {hold} HOLD / {sell} SELL — {feed} feed-eligible")
 
-    # Structured event for GCP metric: signal_run_complete
+    # ── Main structured event — all GCP metrics read from this ────────────
     log_event(logger, "info", "Signal run complete",
-              event="signal_run_complete", session=session,
-              buy=buy, sell=sell, hold=hold, feed_eligible=feed,
-              total=len(signals))
+              event          = "signal_run_complete",
+              session        = session,
+              buy            = buy,
+              sell           = sell,
+              hold           = hold,
+              feed_eligible  = feed,
+              total          = len(signals),
+              high           = high,
+              medium         = medium,
+              low            = low,
+              written        = written,
+              skipped        = skipped,
+              failed_count   = len(failed_syms),
+              failed_symbols = failed_syms,
+              duration_ms    = duration_ms)
+
+    # ── Alert if any symbols failed ────────────────────────────────────────
+    if failed_syms:
+        log_event(logger, "error", f"Signal run partial failure — {len(failed_syms)} symbols failed",
+                  event          = "signal_run_partial_failure",
+                  session        = session,
+                  failed_count   = len(failed_syms),
+                  failed_symbols = failed_syms)
 
     if auto_trade:
         prices = await price_svc.get_all()

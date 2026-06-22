@@ -161,6 +161,13 @@ class SignalService:
                     f"SignalService: skipping Firestore write for {symbol} "
                     f"{new_signal} {new_conf} — only HIGH BUY/SELL persisted"
                 )
+                # Structured event — GCP metric: signal_skipped
+                log_event(logger, "info", f"Signal skipped Firestore write: {symbol} {new_signal} {new_conf}",
+                          event      = "signal_skipped",
+                          symbol     = symbol,
+                          signal     = new_signal,
+                          confidence = new_conf,
+                          reason     = "not_high_buy_sell")
                 return
 
             doc = await loop.run_in_executor(None, ref.get)
