@@ -38,7 +38,6 @@ _SKIP_PATHS = {
     "/",
 }
 
-
 class ErrorLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         start    = time.monotonic()
@@ -48,19 +47,19 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
         status = response.status_code
         path   = request.url.path
 
-        if status >= 400 and path not in _SKIP_PATHS:
-            # Extract uid from request state if auth middleware set it
+        # Only log errors for actual API paths — ignore bot scanning
+        if status >= 400 and path.startswith("/api"):
             uid = getattr(request.state, "uid", None)
             log_event(
                 logger,
                 "error" if status >= 500 else "warning",
                 f"API error {status} {request.method} {path}",
-                event      = "api_error",
-                status     = status,
-                method     = request.method,
-                endpoint   = path,
-                duration_ms= duration,
-                uid        = uid,
+                event       = "api_error",
+                status      = status,
+                method      = request.method,
+                endpoint    = path,
+                duration_ms = duration,
+                uid         = uid,
             )
 
         return response
