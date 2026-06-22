@@ -17,6 +17,7 @@ import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+from utils.logging_setup import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,8 @@ class OnDemandSignalService:
         cached = self._cache.get(symbol)
         if cached and self._is_fresh(cached):
             logger.info(f"OnDemand [{symbol}]: memory cache hit")
+            log_event(logger, "info", f"OnDemand cache hit (memory): {symbol}",
+                      event="ondemand_cache_hit", symbol=symbol, cache="memory")
             return cached
 
         if self._db:
@@ -85,18 +88,26 @@ class OnDemandSignalService:
             if stored:
                 self._cache[symbol] = stored
                 logger.info(f"OnDemand [{symbol}]: Firestore cache hit")
+                log_event(logger, "info", f"OnDemand cache hit (Firestore): {symbol}",
+                          event="ondemand_cache_hit", symbol=symbol, cache="firestore")
                 return stored
 
+        log_event(logger, "info", f"OnDemand generating fresh signal: {symbol}",
+                  event="ondemand_generating", symbol=symbol)
         return await self._generate(symbol)
 
     async def _generate(self, symbol: str) -> dict:
         if not self._engine:
             logger.error("OnDemandSignalService: SignalEngine not set")
+            log_event(logger, "error", f"OnDemand generation failed: engine not set",
+                      event="ondemand_error", symbol=symbol, reason="engine_not_set")
             return self._fallback(symbol)
         try:
             signal = await self._engine.generate(symbol, session="market", trigger="on_demand")
         except Exception as e:
             logger.error(f"OnDemand generate failed for {symbol}: {e}")
+            log_event(logger, "error", f"OnDemand generation failed: {symbol}",
+                      event="ondemand_error", symbol=symbol, reason=str(e))
             return self._fallback(symbol)
 
         now    = datetime.now(timezone.utc)
@@ -108,6 +119,16 @@ class OnDemandSignalService:
 
         self._cache[symbol] = signal
         await self._save_to_firestore(symbol, signal)
+
+        log_event(logger, "info", f"OnDemand signal generated: {symbol} {signal.get('signal')} {signal.get('confidence')}",
+                  event="ondemand_generated",
+                  symbol=symbol,
+                  signal=signal.get("signal"),
+                  confidence=signal.get("confidence"),
+                  conviction_score=signal.get("conviction_score"),
+                  session=_current_session(),
+                  expires_at=exp.isoformat())
+
         logger.info(f"OnDemand [{symbol}]: {signal['signal']}/{signal['confidence']} generated")
         return signal
 
