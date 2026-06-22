@@ -18,6 +18,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 
 from config import settings
+from utils.logging_setup import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,11 @@ class SignalService:
                 return None
             data = doc.to_dict() or {}
             if not self._is_fresh(data):
+                # Structured event — GCP metric filter: jsonPayload.event = "signal_stale"
+                log_event(logger, "warning", f"Signal stale for {symbol} — will regenerate",
+                          event="signal_stale", symbol=symbol,
+                          generated_at=data.get("generated_at"),
+                          expires_at=data.get("expires_at"))
                 return None
             return data
         except Exception as e:
@@ -186,6 +192,14 @@ class SignalService:
 
             # Always update current active signal if it exists or if new is BUY/SELL.
             await loop.run_in_executor(None, lambda: ref.set(signal))
+            # Structured event — GCP metric filter: jsonPayload.event = "signal_written"
+            log_event(logger, "info", f"Signal written to Firestore: {symbol} {signal.get('signal')} {signal.get('confidence')}",
+                      event="signal_written",
+                      symbol=symbol,
+                      signal=signal.get("signal"),
+                      confidence=signal.get("confidence"),
+                      session=signal.get("session", "unknown"),
+                      trigger=signal.get("trigger", "unknown"))
 
         except Exception as e:
             logger.error(f"SignalService: Firestore save failed for {symbol}: {e}")

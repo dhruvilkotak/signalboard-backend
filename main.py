@@ -24,6 +24,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from config import settings
 from utils.market_hours import get_current_session, get_market_status
+from utils.logging_setup import setup_logging, log_event
 from services.price_service import PriceService
 from services.news_service import NewsService
 from services.signal_service import SignalService
@@ -37,8 +38,10 @@ from services.signal_engine import SignalEngine
 from middleware.admin_auth import require_admin
 from middleware.maintenance import MaintenanceModeMiddleware
 from middleware.rate_limit import limiter as rate_limiter
+from middleware.error_logging import ErrorLoggingMiddleware
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# ── Structured JSON logging for GCP Cloud Logging ────────────────────────────
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # ── Service singletons ────────────────────────────────────────────────────────
@@ -71,6 +74,7 @@ SESSIONS = {
 
 # ── Signal runner ─────────────────────────────────────────────────────────────
 async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: bool = False) -> dict:
+    import time
     tickers = ticker_svc.get_tickers()
     logger.info(f"[{session}] Running signals for {len(tickers)} tickers: {tickers}")
 
@@ -94,6 +98,12 @@ async def run_signals_for_admin_tickers(session: str, force: bool, auto_trade: b
     hold = sum(1 for s in signals.values() if s.get("signal") == "HOLD")
     feed = sum(1 for s in signals.values() if s.get("feed_eligible"))
     logger.info(f"[{session}] {buy} BUY / {hold} HOLD / {sell} SELL — {feed} feed-eligible")
+
+    # Structured event for GCP metric: signal_run_complete
+    log_event(logger, "info", "Signal run complete",
+              event="signal_run_complete", session=session,
+              buy=buy, sell=sell, hold=hold, feed_eligible=feed,
+              total=len(signals))
 
     if auto_trade:
         prices = await price_svc.get_all()
@@ -150,38 +160,61 @@ async def price_spike_job():
             logger.error(f"price_spike_job failed for {symbol}: {e}")
 
 # ── Session jobs ──────────────────────────────────────────────────────────────
-async def pre_market_signal_job():
-    logger.info("=== PRE-MARKET signal job ===")
+async def _run_job(name: str, coro, slow_threshold_ms: int = 30_000):
+    """
+    Wrapper for all scheduled jobs.
+    - Logs job_start / job_complete / job_failed structured events
+    - Emits job_slow event if duration exceeds threshold (GCP metric filter)
+    """
+    import time
+    start = time.monotonic()
+    log_event(logger, "info", f"Scheduled job started: {name}",
+              event="job_start", job=name)
     try:
-        await price_svc.update_cache()
-        await news_svc.fetch_and_cache()
-        await run_signals_for_admin_tickers("pre_market", force=True, auto_trade=False)
+        await coro
+        duration_ms = int((time.monotonic() - start) * 1000)
+        log_event(logger, "info", f"Scheduled job complete: {name}",
+                  event="job_complete", job=name, duration_ms=duration_ms)
+        if duration_ms > slow_threshold_ms:
+            log_event(logger, "warning", f"Scheduled job slow: {name}",
+                      event="job_slow", job=name,
+                      duration_ms=duration_ms, threshold_ms=slow_threshold_ms)
     except Exception as e:
-        logger.error(f"Pre-market job failed: {e}")
+        duration_ms = int((time.monotonic() - start) * 1000)
+        log_event(logger, "error", f"Scheduled job failed: {name}",
+                  event="job_failed", job=name,
+                  duration_ms=duration_ms, error=str(e))
+        raise
+
+async def _pre_market_work():
+    await price_svc.update_cache()
+    await news_svc.fetch_and_cache()
+    await run_signals_for_admin_tickers("pre_market", force=True, auto_trade=False)
+
+async def _market_hours_work():
+    await price_svc.update_cache()
+    signals = await run_signals_for_admin_tickers("market", force=False, auto_trade=False)
+    await auto_trader_svc.run_for_all_users(signals)
+
+async def _post_market_work():
+    await news_svc.fetch_and_cache()
+    await price_svc.update_cache()
+    await run_signals_for_admin_tickers("post_market", force=True, auto_trade=False)
+
+async def pre_market_signal_job():
+    await _run_job("pre_market_signal", _pre_market_work())
 
 async def market_hours_signal_job():
-    logger.info("=== MARKET HOURS signal job ===")
-    try:
-        await price_svc.update_cache()
-        signals = await run_signals_for_admin_tickers("market", force=False, auto_trade=False)
-        await auto_trader_svc.run_for_all_users(signals)
-    except Exception as e:
-        logger.error(f"Market hours job failed: {e}")
+    await _run_job("market_hours_signal", _market_hours_work())
 
 async def post_market_signal_job():
-    logger.info("=== POST-MARKET signal job ===")
-    try:
-        await news_svc.fetch_and_cache()
-        await price_svc.update_cache()
-        await run_signals_for_admin_tickers("post_market", force=True, auto_trade=False)
-    except Exception as e:
-        logger.error(f"Post-market job failed: {e}")
+    await _run_job("post_market_signal", _post_market_work())
 
 async def news_refresh_job():
-    await news_svc.fetch_and_cache()
+    await _run_job("news_refresh", news_svc.fetch_and_cache())
 
 async def price_refresh_job():
-    await price_svc.update_cache()
+    await _run_job("price_refresh", price_svc.update_cache(), slow_threshold_ms=10_000)
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
@@ -241,6 +274,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Signal Board API", version="2.3.0", lifespan=lifespan, redirect_slashes=False)
 
 app.add_middleware(MaintenanceModeMiddleware)
+app.add_middleware(ErrorLoggingMiddleware)
 app.add_middleware(CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 from routers import prices, news, signals, alerts, chat, quote, watchlist, search, admin, portfolio

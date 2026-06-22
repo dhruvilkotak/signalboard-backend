@@ -23,6 +23,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import httpx
+from utils.logging_setup import log_event
 from anthropic import AsyncAnthropic
 from config import settings
 
@@ -123,7 +124,9 @@ class SignalEngine:
                     "open":       meta.get("regularMarketOpen", price),
                 }
         except Exception as e:
-            logger.warning(f"Price fetch failed for {symbol}: {e}")
+            # Structured event — GCP metric filter: jsonPayload.event = "yahoo_timeout"
+            log_event(logger, "warning", f"Yahoo Finance price fetch failed for {symbol}",
+                      event="yahoo_timeout", symbol=symbol, error=str(e))
             return {}
 
     async def _fetch_news(self, symbol: str) -> list:
