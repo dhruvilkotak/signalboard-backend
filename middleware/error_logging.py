@@ -25,7 +25,18 @@ from utils.logging_setup import log_event
 logger = logging.getLogger(__name__)
 
 # Don't log errors for these paths (noisy / expected)
-_SKIP_PATHS = {"/health", "/api/market/status"}
+_SKIP_PATHS = {
+    "/health",
+    "/api/market/status",
+    "/.env",
+    "/.env.orig",
+    "/.env.save",
+    "/.gitconfig",
+    "/www/.env",
+    "/app/.env",
+    "/core/.env",
+    "/",
+}
 
 
 class ErrorLoggingMiddleware(BaseHTTPMiddleware):
