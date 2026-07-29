@@ -198,7 +198,7 @@ async def price_spike_job():
             logger.error(f"price_spike_job failed for {symbol}: {e}")
 
 # ── Session jobs ──────────────────────────────────────────────────────────────
-async def _run_job(name: str, coro, slow_threshold_ms: int = 30_000):
+async def _run_job(name: str, coro, slow_threshold_ms: int = 45_000):
     """
     Wrapper for all scheduled jobs.
     - Logs job_start / job_complete / job_failed structured events
