@@ -190,6 +190,23 @@ class OnDemandSignalService:
         self._cache.clear()
         logger.info(f"OnDemand: full cache cleared ({count} symbols)")
         return count
+    
+    async def invalidate_firestore(self, symbol: str):
+        """Delete the Firestore-cached signal for symbol.
+        Paired with invalidate() (memory) for a full cache clear — admin force-regenerate only.
+        """
+        if not self._db:
+            return
+        sym = symbol.upper().strip()
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                lambda: self._db.collection("signals_ondemand").document(sym).delete()
+            )
+            logger.info(f"OnDemand [{sym}]: Firestore cache invalidated")
+        except Exception as e:
+            logger.warning(f"OnDemand Firestore invalidate failed for {sym}: {e}")
 
     def _fallback(self, symbol: str) -> dict:
         now = datetime.now(timezone.utc)

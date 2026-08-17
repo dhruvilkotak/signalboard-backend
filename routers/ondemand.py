@@ -68,8 +68,11 @@ async def force_regenerate_signal(
     if not ondemand_svc:
         raise HTTPException(status_code=503, detail="OnDemand signal service not initialised")
     logger.info(f"[ondemand] Admin force-regenerate: {symbol} by uid={admin['uid'][:8]}…")
-    ondemand_svc.invalidate(symbol)
-    result = await ondemand_svc.get_signal(symbol)
+
+    ondemand_svc.invalidate(symbol)                        # clear memory cache
+    await ondemand_svc.invalidate_firestore(symbol)         # clear Firestore doc
+
+    result = await ondemand_svc.get_signal(symbol)          # now guaranteed cache+Firestore miss → _generate()
     return {**result, "force_regenerated": True}
 
 
