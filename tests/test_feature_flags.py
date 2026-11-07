@@ -135,3 +135,13 @@ def test_set_flag_validation(name, mode):
     svc, _ = make(None)
     with pytest.raises(ValueError):
         svc.set_flag(name, mode, [], actor_uid="admin")
+
+
+def test_no_db_until_set_db_means_off():
+    svc = FeatureFlagService()
+    assert svc.resolve_for("u") == {n: False for n in FLAG_NAMES}
+    with pytest.raises(RuntimeError):
+        svc.set_flag("billing", "on", [], actor_uid="admin")
+    db = FakeDB({"billing": {"mode": "on"}})
+    svc.set_db(db)
+    assert svc.is_enabled("billing", "u")

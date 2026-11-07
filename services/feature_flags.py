@@ -16,8 +16,11 @@ Modes:
 Missing flags, unknown modes and Firestore errors all resolve to OFF, so a bad
 config can never switch a feature on by accident.
 
-Wiring (main.py): create ONE instance and inject it into routers as a
-module-level variable. Never `from main import flag_svc` inside a router.
+Wiring (main.py), same pattern as the other services:
+    flag_svc = FeatureFlagService()        # module level, no db yet
+    flag_svc.set_db(db)                    # in lifespan(), after init_firebase()
+    config_router.flag_svc = flag_svc      # inject; never `from main import`
+Until set_db() runs (or if Firebase is down) every flag reads as OFF.
 """
 
 from __future__ import annotations
@@ -68,12 +71,16 @@ class FeatureFlagService:
         ttl_seconds: float = CACHE_TTL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ):
-        self._db = db if db is not None else firestore.client()
+        self._db = db
         self._ttl = ttl_seconds
         self._clock = clock
         self._lock = threading.Lock()
         self._cache: Optional[dict] = None
         self._loaded_at = 0.0
+
+    def set_db(self, db) -> None:
+        self._db = db
+        self.invalidate()
 
     # ── reads ────────────────────────────────────────────────────────────
 
@@ -81,6 +88,8 @@ class FeatureFlagService:
         return self._db.collection("config").document("feature_flags")
 
     def _load(self) -> dict:
+        if self._db is None:
+            return {n: dict(_OFF) for n in FLAG_NAMES}
         now = self._clock()
         with self._lock:
             if self._cache is not None and now - self._loaded_at < self._ttl:
@@ -133,6 +142,8 @@ class FeatureFlagService:
     # ── writes (admin) ───────────────────────────────────────────────────
 
     def set_flag(self, name: str, mode: str, uids: list[str], actor_uid: str) -> dict:
+        if self._db is None:
+            raise RuntimeError("feature flags unavailable: Firestore not initialised")
         if name not in FLAG_NAMES:
             raise ValueError(f"unknown flag: {name}")
         if mode not in MODES:

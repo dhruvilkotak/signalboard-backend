@@ -30,6 +30,7 @@ from services.news_service import NewsService
 from services.signal_service import SignalService
 from services.technical_service import TechnicalService
 from services.market_service import MarketService
+from services.feature_flags import FeatureFlagService
 from services.ticker_service import TickerService
 from services.portfolio_service import PortfolioService
 from services.auto_trader_service import AutoTraderService
@@ -54,6 +55,7 @@ ticker_svc   = TickerService()
 ondemand_svc = OnDemandSignalService(price_svc, news_svc)
 portfolio_svc    = PortfolioService()
 auto_trader_svc  = AutoTraderService(portfolio_svc, price_svc, signal_svc)
+flag_svc         = FeatureFlagService()
 
 # SignalEngine: shared by both signal services — created after all deps ready
 engine       = SignalEngine(price_svc, news_svc, tech_svc)
@@ -267,6 +269,7 @@ async def lifespan(app: FastAPI):
         signal_svc.set_db(db)
         ticker_svc.set_db(db)
         ondemand_svc.set_db(db)
+        flag_svc.set_db(db)
         portfolio_svc.set_db(db)
         auto_trader_svc.set_db(db)
         auto_trader_svc.signal_svc = signal_svc
@@ -318,6 +321,7 @@ app.add_middleware(CORSMiddleware, allow_origins=settings.CORS_ORIGINS, allow_me
 from routers import prices, news, signals, alerts, chat, quote, watchlist, search, admin, portfolio
 from routers import metrics as metrics_router
 from routers import ondemand
+from routers import config as config_router
 
 signals.signal_svc    = signal_svc
 signals.price_svc     = price_svc
@@ -330,6 +334,7 @@ ondemand.ondemand_svc = ondemand_svc
 portfolio.portfolio_svc   = portfolio_svc
 portfolio.auto_trader_svc = auto_trader_svc
 portfolio.price_svc       = price_svc
+config_router.flag_svc    = flag_svc
 
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
