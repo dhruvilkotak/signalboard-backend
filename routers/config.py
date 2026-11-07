@@ -16,10 +16,8 @@ from pydantic import BaseModel
 
 from services.feature_flags import FLAG_NAMES, MODES, MAX_ALLOWLIST
 
-# TODO: point these at your existing auth dependencies.
-#   get_current_user -> verifies the Firebase ID token, returns a dict with "uid"
-#   require_admin    -> same, but 403s unless the caller is the admin
-from utils.auth import get_current_user, require_admin  # noqa: E402
+from middleware.auth import get_current_user
+from middleware.admin_auth import require_admin
 
 router = APIRouter()
 flag_svc = None  # set in main.py
@@ -54,5 +52,8 @@ def update_feature_flag(name: str, body: FlagUpdate, admin=Depends(require_admin
     if len(body.uids) > MAX_ALLOWLIST:
         raise HTTPException(status_code=400, detail={"code": "ALLOWLIST_TOO_LONG", "max": MAX_ALLOWLIST})
 
-    saved = flag_svc.set_flag(name, body.mode, body.uids, actor_uid=admin["uid"])
+    try:
+        saved = flag_svc.set_flag(name, body.mode, body.uids, actor_uid=admin["uid"])
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail={"code": "FLAGS_UNAVAILABLE"})
     return {"flag": name, **saved}
