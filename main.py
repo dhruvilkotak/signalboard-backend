@@ -348,6 +348,7 @@ app.include_router(admin.router,     prefix="/api/admin",     tags=["admin"])
 app.include_router(ondemand.router,  prefix="/api/ondemand",  tags=["ondemand"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(metrics_router.router, prefix="/api/metrics", tags=["metrics"])
+app.include_router(config_router.router, tags=["config"])
 
 @app.get("/api/market", tags=["market"])
 async def get_market_context():
