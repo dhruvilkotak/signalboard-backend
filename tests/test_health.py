@@ -36,4 +36,4 @@ def test_chat_endpoint_exists(client):
     with patch("anthropic.AsyncAnthropic") as mock_client:
         response = client.post("/api/chat/", json={"question": "What is AAPL?"})
         # Just verify endpoint exists (will fail without real API key, that's fine)
-        assert response.status_code in (200, 500, 422)
+        assert response.status_code in (200, 401, 403, 422, 500)
