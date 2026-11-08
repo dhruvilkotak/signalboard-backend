@@ -31,6 +31,7 @@ from services.signal_service import SignalService
 from services.technical_service import TechnicalService
 from services.market_service import MarketService
 from services.feature_flags import FeatureFlagService
+from services.access_service import AccessService
 from services.ticker_service import TickerService
 from services.portfolio_service import PortfolioService
 from services.auto_trader_service import AutoTraderService
@@ -56,6 +57,7 @@ ondemand_svc = OnDemandSignalService(price_svc, news_svc)
 portfolio_svc    = PortfolioService()
 auto_trader_svc  = AutoTraderService(portfolio_svc, price_svc, signal_svc)
 flag_svc         = FeatureFlagService()
+access_svc       = AccessService(flag_svc)
 
 # SignalEngine: shared by both signal services — created after all deps ready
 engine       = SignalEngine(price_svc, news_svc, tech_svc)
@@ -270,6 +272,7 @@ async def lifespan(app: FastAPI):
         ticker_svc.set_db(db)
         ondemand_svc.set_db(db)
         flag_svc.set_db(db)
+        access_svc.set_db(db)
         portfolio_svc.set_db(db)
         auto_trader_svc.set_db(db)
         auto_trader_svc.signal_svc = signal_svc
@@ -322,6 +325,8 @@ from routers import prices, news, signals, alerts, chat, quote, watchlist, searc
 from routers import metrics as metrics_router
 from routers import ondemand
 from routers import config as config_router
+from routers import access as access_router
+import middleware.access as access_deps
 
 signals.signal_svc    = signal_svc
 signals.price_svc     = price_svc
@@ -335,6 +340,8 @@ portfolio.portfolio_svc   = portfolio_svc
 portfolio.auto_trader_svc = auto_trader_svc
 portfolio.price_svc       = price_svc
 config_router.flag_svc    = flag_svc
+access_router.access_svc  = access_svc
+access_deps.access_svc    = access_svc
 
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
@@ -349,6 +356,7 @@ app.include_router(ondemand.router,  prefix="/api/ondemand",  tags=["ondemand"])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(metrics_router.router, prefix="/api/metrics", tags=["metrics"])
 app.include_router(config_router.router, tags=["config"])
+app.include_router(access_router.router, tags=["access"])
 
 @app.get("/api/market", tags=["market"])
 async def get_market_context():
