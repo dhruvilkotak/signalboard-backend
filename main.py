@@ -41,6 +41,7 @@ from middleware.admin_auth import require_admin
 from middleware.maintenance import MaintenanceModeMiddleware
 from middleware.rate_limit import limiter as rate_limiter
 from middleware.error_logging import ErrorLoggingMiddleware
+from services.usage_service import UsageService           
 
 # ── Structured JSON logging for GCP Cloud Logging ────────────────────────────
 setup_logging()
@@ -58,6 +59,7 @@ portfolio_svc    = PortfolioService()
 auto_trader_svc  = AutoTraderService(portfolio_svc, price_svc, signal_svc)
 flag_svc         = FeatureFlagService()
 access_svc       = AccessService(flag_svc)
+usage_svc        = UsageService(access_svc, flag_svc)  
 
 # SignalEngine: shared by both signal services — created after all deps ready
 engine       = SignalEngine(price_svc, news_svc, tech_svc)
@@ -275,6 +277,7 @@ async def lifespan(app: FastAPI):
         access_svc.set_db(db)
         portfolio_svc.set_db(db)
         auto_trader_svc.set_db(db)
+        usage_svc.set_db(db) 
         auto_trader_svc.signal_svc = signal_svc
         from routers import watchlist as watchlist_router
         watchlist_router.ticker_svc = ticker_svc
@@ -342,6 +345,8 @@ portfolio.price_svc       = price_svc
 config_router.flag_svc    = flag_svc
 access_router.access_svc  = access_svc
 access_deps.access_svc    = access_svc
+ondemand.usage_svc    = usage_svc 
+ondemand.signal_svc   = signal_svc
 
 app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
