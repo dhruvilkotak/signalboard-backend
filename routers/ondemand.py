@@ -8,17 +8,27 @@ Auth:
   POST /api/ondemand/signal  — any authenticated user (get_current_user)
   GET  /api/ondemand/signal/{symbol} — any authenticated user
 
+Quota (flag `paywall`, see services/usage_service.py):
+  free/trial: 5 distinct signals per lifetime → 402 PAYWALL
+  pro/paid/coupon: 50 new signals per day     → 429 DAILY_LIMIT
+  Re-viewing a still-current signal is free. Failed generations are not counted.
+  Successful responses include "quota" so the UI can show signals left.
+
 Cache: 24h shared in Firestore signals_ondemand/{symbol}
-Service injected by main.py: ondemand.ondemand_svc = ondemand_svc
+Services injected by main.py:
+  ondemand.ondemand_svc = ondemand_svc
+  ondemand.usage_svc    = usage_svc
 """
 
 import logging
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from middleware.auth import get_current_user
 from middleware.admin_auth import require_admin
 from middleware.rate_limit import rate_limiter
+from services.usage_service import QuotaExceeded
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -26,10 +36,36 @@ router = APIRouter()
 # Injected by main.py
 ondemand_svc = None
 signal_svc   = None   # injected for cache reset
+usage_svc    = None   # injected for quota; None = no quota
 
 
 class SignalRequest(BaseModel):
     symbol: str
+
+
+async def _serve(uid: str, symbol: str) -> dict:
+    if not ondemand_svc:
+        raise HTTPException(status_code=503, detail="OnDemand signal service not initialised")
+    if usage_svc is None:
+        return await ondemand_svc.get_signal(symbol)
+
+    try:
+        res = await run_in_threadpool(usage_svc.reserve, uid, symbol)
+    except QuotaExceeded as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+
+    try:
+        signal = await ondemand_svc.get_signal(symbol)
+    except Exception:
+        await run_in_threadpool(usage_svc.release, uid, res)
+        raise
+
+    if signal.get("trigger") == "fallback":
+        await run_in_threadpool(usage_svc.release, uid, res)
+        return signal
+
+    await run_in_threadpool(usage_svc.confirm, uid, res, signal.get("expires_at"))
+    return {**signal, "quota": res.quota or None}
 
 
 @router.post("/signal")
@@ -40,10 +76,7 @@ async def get_ondemand_signal(
     symbol = req.symbol.strip().upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
-    if not ondemand_svc:
-        raise HTTPException(status_code=503, detail="OnDemand signal service not initialised")
-    result = await ondemand_svc.get_signal(symbol)
-    return result
+    return await _serve(user["uid"], symbol)
 
 
 @router.get("/signal/{symbol}")
@@ -52,9 +85,9 @@ async def get_ondemand_signal_get(
     user=Depends(get_current_user),
 ):
     symbol = symbol.strip().upper()
-    if not ondemand_svc:
-        raise HTTPException(status_code=503, detail="OnDemand signal service not initialised")
-    return await ondemand_svc.get_signal(symbol)
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    return await _serve(user["uid"], symbol)
 
 
 @router.post("/signal/force")
