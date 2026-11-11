@@ -350,6 +350,7 @@ portfolio.price_svc       = price_svc
 config_router.flag_svc    = flag_svc
 access_router.access_svc  = access_svc
 access_deps.access_svc    = access_svc
+access_deps.flag_svc      = flag_svc
 ondemand.usage_svc    = usage_svc 
 ondemand.signal_svc   = signal_svc
 legal_router.legal_svc = legal_svc
@@ -361,12 +362,12 @@ app.include_router(prices.router,    prefix="/api/prices",    tags=["prices"])
 app.include_router(news.router,      prefix="/api/news",      tags=["news"])
 app.include_router(signals.router,   prefix="/api/signals",   tags=["signals"])
 app.include_router(alerts.router,    prefix="/api/alerts",    tags=["alerts"])
-app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"])
+app.include_router(chat.router,      prefix="/api/chat",      tags=["chat"],      dependencies=[Depends(terms_deps.require_terms_accepted)])
 app.include_router(quote.router,     prefix="/api/quote",     tags=["quote"])
-app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"])
+app.include_router(watchlist.router, prefix="/api/watchlist", tags=["watchlist"], dependencies=[Depends(terms_deps.require_terms_accepted)])
 app.include_router(search.router,    prefix="/api/search",    tags=["search"])
 app.include_router(admin.router,     prefix="/api/admin",     tags=["admin"])
-app.include_router(ondemand.router,  prefix="/api/ondemand",  tags=["ondemand"])
+app.include_router(ondemand.router,  prefix="/api/ondemand",  tags=["ondemand"],  dependencies=[Depends(terms_deps.require_terms_accepted)])
 app.include_router(portfolio.router, prefix="/api/portfolio", tags=["portfolio"])
 app.include_router(metrics_router.router, prefix="/api/metrics", tags=["metrics"])
 app.include_router(config_router.router, tags=["config"])

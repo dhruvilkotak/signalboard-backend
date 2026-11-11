@@ -42,12 +42,22 @@ async def approve_user(req: ApproveRequest, admin=Depends(require_admin)):
     except Exception as e:
         logger.warning(f"Watchlist seed failed for {req.uid}: {e} — user can still add stocks manually")
 
+    # Start the 7-day trial (no visible effect until the `trial` flag is on).
+    # Idempotent: re-approving never restarts or extends an existing trial.
+    trial_ends_at = None
+    try:
+        from services.trial_service import start_trial
+        trial_ends_at = start_trial(db, req.uid).isoformat()
+    except Exception as e:
+        logger.warning(f"Trial start failed for {req.uid}: {e}")
+
     # Send approval email
     email_sent = await send_approval_email(req.email, req.name)
 
     return {
         "success":    True,
         "email_sent": email_sent,
+        "trial_ends_at": trial_ends_at,
         "message":    f"User {req.name} approved. Email {'sent' if email_sent else 'failed — check RESEND_API_KEY'}.",
     }
 
