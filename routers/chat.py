@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from anthropic import AsyncAnthropic
 
 from middleware.auth import get_current_user
+from middleware.access import require_feature
 from middleware.rate_limit import rate_limiter
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/")
-async def chat(req: ChatRequest, user=Depends(get_current_user)):
+async def chat(req: ChatRequest, user=Depends(require_feature("ai_chat"))):
     await rate_limiter.check(user["uid"], "chat")
 
     # Build price + news context if symbol provided

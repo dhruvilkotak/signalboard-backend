@@ -11,6 +11,7 @@ from firebase_admin import firestore as fs
 
 from middleware.auth       import get_current_user, optional_user
 from middleware.admin_auth import require_admin
+from middleware.access import require_feature_optional
 from services.firebase_service import get_db
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ async def get_signal_feed(
     confidence: str  = Query(default="HIGH"),
     show_all:   bool = Query(default=False),
     cutoff_days: int = Query(default=7),
-    user=Depends(optional_user),
+    user=Depends(require_feature_optional("ai_signals")),
 ):
     """
     Signal feed — one card per symbol, no duplicates.
@@ -170,7 +171,7 @@ async def get_signal_feed(
 @router.get("/{symbol}/history")
 async def get_signal_history(
     symbol: str,
-    user=Depends(optional_user),
+    user=Depends(require_feature_optional("ai_signals")),
 ):
     """
     Signal history for one symbol.
@@ -213,7 +214,7 @@ async def get_signal_history(
 
 @router.get("/{symbol}")
 async def get_signal(symbol: str, force: bool = Query(default=False),
-                     user=Depends(optional_user)):
+                     user=Depends(require_feature_optional("ai_signals"))):
     """Get or generate signal for one symbol."""
     if not signal_svc:
         raise HTTPException(503, "Signal service not available")
@@ -226,7 +227,7 @@ async def get_signal(symbol: str, force: bool = Query(default=False),
 
 
 @router.get("/")
-async def get_all_signals(user=Depends(optional_user)):
+async def get_all_signals(user=Depends(require_feature_optional("ai_signals"))):
     if not signal_svc:
         raise HTTPException(503, "Signal service not available")
     return signal_svc.get_all_cached()

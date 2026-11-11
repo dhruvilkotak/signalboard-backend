@@ -29,6 +29,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from middleware.auth import get_current_user
+from middleware.access import require_feature
 from middleware.admin_auth import require_admin
 
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ async def get_summary(user=Depends(get_current_user)):
         raise HTTPException(500, str(e))
 
 @router.post("/agreement")
-async def accept_agreement(user=Depends(get_current_user)):
+async def accept_agreement(user=Depends(require_feature("autotrader"))):
     _need_portfolio()
     try:
         await portfolio_svc.get_or_create_summary(user["uid"])
@@ -244,7 +245,7 @@ async def get_strategy_trades(strategy_key: str, user=Depends(get_current_user),
         raise HTTPException(500, str(e))
 
 @router.post("/allocate")
-async def allocate(req: AllocateRequest, user=Depends(get_current_user)):
+async def allocate(req: AllocateRequest, user=Depends(require_feature("autotrader"))):
     _need_portfolio()
     try:
         return await portfolio_svc.allocate(user["uid"], req.strategy_key,
