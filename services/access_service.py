@@ -75,6 +75,12 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 
+def _iso_dict(d) -> Optional[dict]:
+    if not isinstance(d, dict):
+        return None
+    return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in d.items()}
+
+
 def _default_role_lookup(uid: str) -> Optional[str]:
     claims = fb_auth.get_user(uid).custom_claims or {}
     return claims.get("role")
@@ -204,9 +210,14 @@ class AccessService:
         sub_status = sub_doc.get("status")
         used = int(usage_doc.get("ondemand_used", 0) or 0)
 
+        liquidation = {
+            "pending": bool(access_doc.get("pending_liquidation")),
+            "last": _iso_dict(access_doc.get("last_liquidation")),
+        }
+
         def full(plan: str) -> dict:
             return self._result(plan, role, {f: True for f in FEATURES}, None, used,
-                                trial_ends_at, coupon_until, sub_status)
+                                trial_ends_at, coupon_until, sub_status, liquidation)
 
         if role == "admin":
             return full("admin")
@@ -229,10 +240,11 @@ class AccessService:
             plan = "legacy"
 
         limit = FREE_ONDEMAND_LIMIT if paywall_on else None
-        return self._result(plan, role, features, limit, used, trial_ends_at, coupon_until, sub_status)
+        return self._result(plan, role, features, limit, used, trial_ends_at, coupon_until, sub_status, liquidation)
 
     @staticmethod
-    def _result(plan, role, features, limit, used, trial_ends_at, coupon_until, sub_status) -> dict:
+    def _result(plan, role, features, limit, used, trial_ends_at, coupon_until, sub_status,
+                liquidation=None) -> dict:
         return {
             "plan": plan,                      # admin | pro | paid | coupon | trial | free | legacy
             "role": role,
@@ -245,4 +257,5 @@ class AccessService:
             "trial_ends_at": _iso(trial_ends_at),
             "coupon_until": _iso(coupon_until),
             "subscription_status": sub_status,
+            "liquidation": liquidation or {"pending": False, "last": None},   # Auto-Trader access-expiry state
         }

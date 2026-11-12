@@ -524,7 +524,8 @@ class PortfolioService:
         })
         return {"strategy_key": sk, "is_paused": paused}
 
-    async def stop_strategy(self, uid: str, sk: str, prices: dict) -> dict:
+    async def stop_strategy(self, uid: str, sk: str, prices: dict,
+                            trigger: str = "stop_strategy") -> dict:
         """Close all strategy positions, return all cash to available_cash."""
         strat = await self.get_strategy(uid, sk)
         if not strat: raise ValueError(f"Strategy {sk} not allocated")
@@ -532,7 +533,7 @@ class PortfolioService:
         positions = await self.get_strategy_positions(uid, sk)
         for pos in positions:
             price = prices.get(pos["symbol"], pos.get("current_price", pos["buy_price"]))
-            await self.strategy_sell(uid, pos["symbol"], sk, price, {}, trigger="stop_strategy")
+            await self.strategy_sell(uid, pos["symbol"], sk, price, {}, trigger=trigger)
 
         strat_fresh  = await self.get_strategy(uid, sk)
         total_return = self._r2((strat_fresh or strat).get("cash_in_strategy", 0))
@@ -548,7 +549,8 @@ class PortfolioService:
         await self._log_tx(uid, {
             "type": "stop_withdraw", "strategy_key": sk, "amount": total_return,
             "available_cash_before": old_cash, "available_cash_after": new_cash,
-            "notes": f"Stopped {STRATEGIES[sk]['label']} — {len(positions)} positions closed, ${total_return:.2f} returned",
+            "notes": (f"{'Access ended — ' if trigger == 'access_expired' else ''}"
+                      f"Stopped {STRATEGIES[sk]['label']} — {len(positions)} positions closed, ${total_return:.2f} returned"),
         })
         await self._sync_total_value(uid)
         return {"strategy_key": sk, "positions_closed": len(positions),

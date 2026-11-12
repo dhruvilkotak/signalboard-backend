@@ -43,6 +43,7 @@ from middleware.rate_limit import limiter as rate_limiter
 from middleware.error_logging import ErrorLoggingMiddleware
 from services.usage_service import UsageService
 from services.coupon_service import CouponService
+from services.access_expiry_service import AccessExpiryService
 from services.legal_service import LegalService              
 
 # ── Structured JSON logging for GCP Cloud Logging ────────────────────────────
@@ -63,6 +64,7 @@ flag_svc         = FeatureFlagService()
 access_svc       = AccessService(flag_svc)
 usage_svc        = UsageService(access_svc, flag_svc)
 coupon_svc       = CouponService(access_svc)
+expiry_svc       = AccessExpiryService(portfolio_svc, price_svc, access_svc, flag_svc)
 legal_svc        = LegalService()   
 
 # SignalEngine: shared by both signal services — created after all deps ready
@@ -261,6 +263,9 @@ async def post_market_signal_job():
 async def news_refresh_job():
     await _run_job("news_refresh", news_svc.fetch_and_cache())
 
+async def access_expiry_job():
+    await _run_job("access_expiry", expiry_svc.run())
+
 async def price_refresh_job():
     await _run_job("price_refresh", price_svc.update_cache(), slow_threshold_ms=10_000)
 
@@ -283,6 +288,7 @@ async def lifespan(app: FastAPI):
         auto_trader_svc.set_db(db)
         usage_svc.set_db(db)
         coupon_svc.set_db(db)
+        expiry_svc.set_db(db)
         legal_svc.set_db(db)
         auto_trader_svc.signal_svc = signal_svc
         from routers import watchlist as watchlist_router
@@ -303,6 +309,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(price_spike_job,    "interval", seconds=30,  id="price_spike_resignal")
     scheduler.add_job(auto_trader_svc.stop_loss_monitor, "interval", seconds=60, id="stop_loss_monitor")
     scheduler.add_job(rate_limiter.clear_expired, "interval", minutes=5, id="rate_limiter_cleanup")
+    scheduler.add_job(access_expiry_job,  "interval", minutes=15,  id="access_expiry")
     for hour, minute in [(4,0),(6,0),(8,0),(9,0)]:
         scheduler.add_job(pre_market_signal_job,
             CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone="America/New_York"),
