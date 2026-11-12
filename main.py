@@ -44,6 +44,7 @@ from middleware.error_logging import ErrorLoggingMiddleware
 from services.usage_service import UsageService
 from services.coupon_service import CouponService
 from services.access_expiry_service import AccessExpiryService
+from services.billing_service import BillingService
 from services.legal_service import LegalService              
 
 # ── Structured JSON logging for GCP Cloud Logging ────────────────────────────
@@ -65,6 +66,7 @@ access_svc       = AccessService(flag_svc)
 usage_svc        = UsageService(access_svc, flag_svc)
 coupon_svc       = CouponService(access_svc)
 expiry_svc       = AccessExpiryService(portfolio_svc, price_svc, access_svc, flag_svc)
+billing_svc      = BillingService(access_svc)
 legal_svc        = LegalService()   
 
 # SignalEngine: shared by both signal services — created after all deps ready
@@ -289,6 +291,7 @@ async def lifespan(app: FastAPI):
         usage_svc.set_db(db)
         coupon_svc.set_db(db)
         expiry_svc.set_db(db)
+        billing_svc.set_db(db)
         legal_svc.set_db(db)
         auto_trader_svc.signal_svc = signal_svc
         from routers import watchlist as watchlist_router
@@ -343,6 +346,7 @@ from routers import ondemand
 from routers import config as config_router
 from routers import access as access_router
 from routers import coupons as coupons_router
+from routers import billing as billing_router
 from routers import legal as legal_router     
 import middleware.terms as terms_deps
 import middleware.access as access_deps
@@ -364,6 +368,8 @@ access_deps.access_svc    = access_svc
 access_deps.flag_svc      = flag_svc
 coupons_router.coupon_svc = coupon_svc
 coupons_router.flag_svc   = flag_svc
+billing_router.billing_svc = billing_svc
+billing_router.flag_svc   = flag_svc
 ondemand.usage_svc    = usage_svc 
 ondemand.signal_svc   = signal_svc
 legal_router.legal_svc = legal_svc
@@ -386,6 +392,7 @@ app.include_router(metrics_router.router, prefix="/api/metrics", tags=["metrics"
 app.include_router(config_router.router, tags=["config"])
 app.include_router(access_router.router, tags=["access"])
 app.include_router(coupons_router.router, tags=["coupons"])
+app.include_router(billing_router.router, tags=["billing"])
 app.include_router(legal_router.router, tags=["legal"]) 
 
 @app.get("/api/market", tags=["market"])
