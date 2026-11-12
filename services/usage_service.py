@@ -131,6 +131,26 @@ def decide(data: dict, kind: str, symbol: str, now: datetime, plan: str = "free"
     return doc, Reservation(symbol, "none", counted=False)
 
 
+def peek_decision(data: dict, kind: str, symbol: str, now: datetime) -> dict:
+    """
+    Read-only preview of what opening `symbol` would cost, without writing.
+    status: "unlimited" (never counted) | "free" (already viewed, still current)
+            | "uses_one" (would use 1 slot) | "blocked" (no slots left).
+    """
+    if kind == "none":
+        return {"symbol": symbol, "status": "unlimited", "quota": None, "code": None}
+    try:
+        _, res = decide(data, kind, symbol, now)
+    except QuotaExceeded as e:
+        return {"symbol": symbol, "status": "blocked", "quota": e.detail["ondemand"], "code": e.detail["code"]}
+    if not res.counted:
+        return {"symbol": symbol, "status": "free", "quota": res.quota, "code": None}
+    q = dict(res.quota)                       # decide() returned the post-use count; report the current one
+    q["used"] -= 1
+    q["left"] = min(q["left"] + 1, q["limit"])
+    return {"symbol": symbol, "status": "uses_one", "quota": q, "code": None}
+
+
 class UsageService:
     def __init__(self, access_svc, flag_svc, db=None,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)):
@@ -187,6 +207,16 @@ class UsageService:
             logger.info("ondemand_quota_used", extra={"event": "ondemand_quota_used", "uid": uid,
                                                        "symbol": symbol, "kind": kind, **res.quota})
         return res
+
+    def peek(self, uid: str, symbol: str) -> dict:
+        """What would GET /api/ondemand/signal/{symbol} cost this user? No writes."""
+        symbol = symbol.upper().strip()
+        kind, _ = self._kind_for(uid)
+        if kind == "none" or self._db is None:
+            return peek_decision({}, "none", symbol, self._now())
+        snap = self._ref(uid).get()
+        data = (snap.to_dict() or {}) if snap.exists else {}
+        return peek_decision(data, kind, symbol, self._now())
 
     def confirm(self, uid: str, res: Reservation, expires_at: Optional[str]) -> None:
         """Signal delivered: remember its expiry so re-views are free."""

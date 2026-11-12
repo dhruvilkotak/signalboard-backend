@@ -7,6 +7,8 @@ Separate from scheduler signals (signals/{symbol}).
 Auth:
   POST /api/ondemand/signal  — any authenticated user (get_current_user)
   GET  /api/ondemand/signal/{symbol} — any authenticated user
+  GET  /api/ondemand/peek/{symbol}   — any authenticated user; read-only, says whether
+                                       opening this symbol is free / uses 1 / is blocked
 
 Quota (flag `paywall`, see services/usage_service.py):
   admin: unlimited
@@ -15,7 +17,8 @@ Quota (flag `paywall`, see services/usage_service.py):
   Re-viewing a still-current signal is free. Failed generations are not counted.
   Successful responses include "quota" so the UI can show signals left.
 
-Cache: 24h shared in Firestore signals_ondemand/{symbol}
+Cache: shared in Firestore signals_ondemand/{symbol}; every signal expires 11:59 PM ET.
+A user's first view of a symbol each day counts even if someone else generated it.
 Services injected by main.py:
   ondemand.ondemand_svc = ondemand_svc
   ondemand.usage_svc    = usage_svc
@@ -89,6 +92,20 @@ async def get_ondemand_signal_get(
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
     return await _serve(user["uid"], symbol)
+
+
+@router.get("/peek/{symbol}")
+async def peek_ondemand_signal(
+    symbol: str,
+    user=Depends(get_current_user),
+):
+    """Read-only: lets the UI ask before spending a signal. Never counts anything."""
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if usage_svc is None:
+        return {"symbol": symbol, "status": "unlimited", "quota": None, "code": None}
+    return await run_in_threadpool(usage_svc.peek, user["uid"], symbol)
 
 
 @router.post("/signal/force")
