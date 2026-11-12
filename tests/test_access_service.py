@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from services.access_service import ADMIN_UID, FEATURES, AccessService
+from services.usage_service import week_key
 
 NOW = datetime(2026, 11, 7, 12, 0, tzinfo=timezone.utc)
 
@@ -65,6 +66,11 @@ def svc(flags=None, role="user", **docs):
 ALL = {f: True for f in FEATURES}
 
 
+def week(n):
+    """Usage doc with n signals counted in NOW's week."""
+    return {"ondemand_week": week_key(NOW), "ondemand_week_count": n}
+
+
 def test_flags_off_is_legacy_everything():
     a = svc().get_access("u")
     assert a["plan"] == "legacy"
@@ -105,7 +111,8 @@ def test_trial_active_gets_trial_features_and_quota():
     assert a["plan"] == "trial"
     assert a["features"]["ai_chat"] and a["features"]["autotrader"] and a["features"]["ai_signals"]
     assert a["features"]["ondemand"] is True
-    assert a["ondemand"] == {"used": 2, "limit": 5, "left": 3}
+    q = a["ondemand"]
+    assert (q["used"], q["limit"], q["left"], q["period"], q["resets_at"]) == (2, 5, 3, "total", None)
 
 
 def test_trial_expired_and_quota_used_up():
@@ -114,6 +121,35 @@ def test_trial_expired_and_quota_used_up():
     assert a["plan"] == "free"
     assert not any(a["features"].values())
     assert a["ondemand"]["left"] == 0
+
+
+def test_free_lifetime_never_resets():
+    a = svc(Flags(paywall=True), usage={"ondemand_used": 5, "ondemand_week": "2020-01-06"}).get_access("u")
+    assert a["features"]["ondemand"] is False and a["ondemand"]["period"] == "total"
+
+
+def test_paid_last_weeks_usage_is_ignored():
+    a = svc(Flags(paywall=True), subscription={"status": "active"},
+            usage={"ondemand_used": 5, "ondemand_week": "2020-01-06", "ondemand_week_count": 5}).get_access("u")
+    assert a["features"]["ondemand"] is True and a["ondemand"]["used"] == 0 and a["ondemand"]["period"] == "week"
+
+
+@pytest.mark.parametrize("kw", [
+    {"role": "pro", "flags": {"pro_role": True}},
+    {"subscription": {"status": "active"}},
+    {"access": {"coupon_until": NOW + timedelta(days=3)}},
+])
+def test_paid_pro_coupon_also_weekly_limited(kw):
+    flags = Flags(paywall=True, **kw.pop("flags", {}))
+    a = svc(flags, usage=week(5), **kw).get_access("u")
+    assert a["plan"] in ("pro", "paid", "coupon")
+    assert a["features"]["ai_chat"] is True
+    assert a["features"]["ondemand"] is False and a["ondemand"]["limit"] == 5
+
+
+def test_admin_unlimited_even_with_usage():
+    a = svc(Flags(paywall=True), usage=week(50)).get_access(ADMIN_UID)
+    assert a["features"]["ondemand"] is True and a["ondemand"]["limit"] is None
 
 
 def test_only_paywall_on_leaves_ai_features_open():

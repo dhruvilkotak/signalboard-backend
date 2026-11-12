@@ -10,7 +10,9 @@ Precedence (first match wins):
     3. paid subscription (active/trialing) -> every user feature
     4. coupon_until in the future          -> every user feature
     5. trial_ends_at in the future         -> ai_signals, ai_chat, autotrader
-    6. free                                -> 5 lifetime on-demand signals
+    6. free                                -> no AI features
+    On-demand signals (flag `paywall`): admin unlimited; free/trial 5 in total;
+    pro/paid/coupon 5 per week (resets Monday 00:00 ET).
 
 Each feature is only gated while its flag is on for that user:
     ondemand                          gated by flag `paywall`
@@ -45,7 +47,6 @@ logger = logging.getLogger(__name__)
 
 FEATURES: tuple[str, ...] = ("ondemand", "ai_signals", "ai_chat", "autotrader")
 TRIAL_FEATURES: tuple[str, ...] = ("ai_signals", "ai_chat", "autotrader")
-FREE_ONDEMAND_LIMIT = 5
 ASSIGNABLE_ROLES: tuple[str, ...] = ("user", "pro")      # admin is never set via API
 ACTIVE_SUB_STATUSES = ("active", "trialing")
 
@@ -208,7 +209,18 @@ class AccessService:
         trial_ends_at = _as_utc(access_doc.get("trial_ends_at"))
         coupon_until = _as_utc(access_doc.get("coupon_until"))
         sub_status = sub_doc.get("status")
-        used = int(usage_doc.get("ondemand_used", 0) or 0)
+        from services.usage_service import FREE_LIFETIME_LIMIT, WEEKLY_LIMIT, week_resets_at, week_used
+        lifetime_used = int(usage_doc.get("ondemand_used", 0) or 0)
+        weekly_used = week_used(usage_doc, now)
+        ondemand_limited = paywall_on and role != "admin"
+
+        def quota(full_plan: bool):
+            """(feature_ok, used, limit, resets_at, period) for this user's plan."""
+            if not ondemand_limited:
+                return True, lifetime_used, None, None, None
+            if full_plan:
+                return weekly_used < WEEKLY_LIMIT, weekly_used, WEEKLY_LIMIT, week_resets_at(now), "week"
+            return lifetime_used < FREE_LIFETIME_LIMIT, lifetime_used, FREE_LIFETIME_LIMIT, None, "total"
 
         liquidation = {
             "pending": bool(access_doc.get("pending_liquidation")),
@@ -216,8 +228,14 @@ class AccessService:
         }
 
         def full(plan: str) -> dict:
-            return self._result(plan, role, {f: True for f in FEATURES}, None, used,
-                                trial_ends_at, coupon_until, sub_status, liquidation)
+            features = {f: True for f in FEATURES}
+            if plan == "admin":
+                return self._result(plan, role, features, None, lifetime_used,
+                                    trial_ends_at, coupon_until, sub_status, liquidation)
+            ok, used, limit, resets_at, period = quota(full_plan=True)
+            features["ondemand"] = ok
+            return self._result(plan, role, features, limit, used,
+                                trial_ends_at, coupon_until, sub_status, liquidation, resets_at, period)
 
         if role == "admin":
             return full("admin")
@@ -230,7 +248,8 @@ class AccessService:
 
         trial_active = bool(trial_ends_at and trial_ends_at > now)
         features = {f: (not trial_on) or trial_active for f in TRIAL_FEATURES}
-        features["ondemand"] = (not paywall_on) or used < FREE_ONDEMAND_LIMIT
+        ok, used, limit, resets_at, period = quota(full_plan=False)
+        features["ondemand"] = ok
 
         if trial_on and trial_active:
             plan = "trial"
@@ -239,12 +258,12 @@ class AccessService:
         else:
             plan = "legacy"
 
-        limit = FREE_ONDEMAND_LIMIT if paywall_on else None
-        return self._result(plan, role, features, limit, used, trial_ends_at, coupon_until, sub_status, liquidation)
+        return self._result(plan, role, features, limit, used, trial_ends_at, coupon_until, sub_status,
+                            liquidation, resets_at, period)
 
     @staticmethod
     def _result(plan, role, features, limit, used, trial_ends_at, coupon_until, sub_status,
-                liquidation=None) -> dict:
+                liquidation=None, resets_at=None, period=None) -> dict:
         return {
             "plan": plan,                      # admin | pro | paid | coupon | trial | free | legacy
             "role": role,
@@ -253,6 +272,8 @@ class AccessService:
                 "used": used,
                 "limit": limit,                # None = unlimited
                 "left": None if limit is None else max(limit - used, 0),
+                "period": None if limit is None else period,     # "total" | "week"
+                "resets_at": _iso(resets_at) if limit is not None else None,
             },
             "trial_ends_at": _iso(trial_ends_at),
             "coupon_until": _iso(coupon_until),
