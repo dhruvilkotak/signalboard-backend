@@ -9,8 +9,9 @@ Auth:
   GET  /api/ondemand/signal/{symbol} — any authenticated user
 
 Quota (flag `paywall`, see services/usage_service.py):
-  free/trial: 5 distinct signals per lifetime → 402 PAYWALL
-  pro/paid/coupon: 50 new signals per day     → 429 DAILY_LIMIT
+  admin: unlimited
+  free/trial: 5 new signals in total, never reset   → 402 PAYWALL when used up
+  pro/paid/coupon: 5 new signals per week (Mon ET)  → 429 WEEKLY_LIMIT when used up
   Re-viewing a still-current signal is free. Failed generations are not counted.
   Successful responses include "quota" so the UI can show signals left.
 

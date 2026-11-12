@@ -2,9 +2,12 @@
 UsageService — on-demand signal quota.
 
 Rules (only while flag `paywall` is on for the user; otherwise nothing is counted):
-    admin                      -> unlimited, never counted
-    pro / paid / coupon        -> fair-use cap: 50 new signals per day (ET)
-    trial / free               -> 5 lifetime on-demand signals
+    admin                -> unlimited, never counted
+    free / trial         -> 5 new on-demand signals in total, never reset
+                            -> 402 PAYWALL when used up (upgrade prompt)
+    pro / paid / coupon  -> 5 new on-demand signals per week; resets every
+                            Monday 00:00 America/New_York
+                            -> 429 WEEKLY_LIMIT when used up (no upsell)
 Re-opening a symbol whose signal is still current is free: the quota counts
 distinct signals, not page loads.
 
@@ -15,10 +18,10 @@ Flow per request (routers/ondemand.py):
     success -> usage_svc.confirm(uid, res, signal["expires_at"])
 
 Firestore: users/{uid}/data/usage (server-write only; see firestore.rules)
-    ondemand_used     lifetime count (free/trial)
-    ondemand_day      "YYYY-MM-DD" (ET) of ondemand_today
-    ondemand_today    count for that day (pro/paid/coupon)
-    ondemand_symbols  {SYMBOL: expires_at ISO} — free re-views until expiry
+    ondemand_used        lifetime count (free / trial)
+    ondemand_week        "YYYY-MM-DD" of the Monday (ET) the weekly count belongs to
+    ondemand_week_count  signals counted that week (pro / paid / coupon)
+    ondemand_symbols     {SYMBOL: expires_at ISO} — free re-views until expiry
 
 Wiring (main.py):
     usage_svc = UsageService(access_svc, flag_svc)
@@ -30,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -40,8 +43,26 @@ logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 FREE_LIFETIME_LIMIT = 5
-DAILY_FAIR_USE_LIMIT = 50
+WEEKLY_LIMIT = 5
 FULL_PLANS = ("pro", "paid", "coupon")
+
+
+def week_key(now: datetime) -> str:
+    """Monday (ET) of the week containing `now`, as YYYY-MM-DD."""
+    d = now.astimezone(ET).date()
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def week_resets_at(now: datetime) -> datetime:
+    """Next Monday 00:00 ET, in UTC."""
+    d = now.astimezone(ET).date()
+    monday = d - timedelta(days=d.weekday()) + timedelta(days=7)
+    return datetime(monday.year, monday.month, monday.day, tzinfo=ET).astimezone(timezone.utc)
+
+
+def week_used(usage_doc: dict, now: datetime) -> int:
+    doc = usage_doc or {}
+    return int(doc.get("ondemand_week_count", 0) or 0) if doc.get("ondemand_week") == week_key(now) else 0
 
 
 class QuotaExceeded(Exception):
@@ -54,7 +75,7 @@ class QuotaExceeded(Exception):
 @dataclass
 class Reservation:
     symbol: str
-    kind: str                      # "none" | "lifetime" | "daily"
+    kind: str                      # "none" | "lifetime" | "weekly"
     counted: bool                  # False = free re-view or uncounted plan
     quota: dict = field(default_factory=dict)
 
@@ -69,10 +90,11 @@ def _parse(iso) -> Optional[datetime]:
         return None
 
 
-def decide(data: dict, kind: str, symbol: str, now: datetime) -> tuple[dict, Reservation]:
+def decide(data: dict, kind: str, symbol: str, now: datetime, plan: str = "free") -> tuple[dict, Reservation]:
     """
     Pure decision: given the current usage doc, return (new_doc, reservation)
     or raise QuotaExceeded. No I/O — this is what the tests cover.
+    kind: "lifetime" (free/trial), "weekly" (pro/paid/coupon) or "none".
     """
     doc = dict(data or {})
     symbols = {s: e for s, e in (doc.get("ondemand_symbols") or {}).items()
@@ -81,30 +103,30 @@ def decide(data: dict, kind: str, symbol: str, now: datetime) -> tuple[dict, Res
 
     if kind == "lifetime":
         used = int(doc.get("ondemand_used", 0) or 0)
-        quota = {"used": used, "limit": FREE_LIFETIME_LIMIT, "left": max(FREE_LIFETIME_LIMIT - used, 0)}
+        quota = lambda u: {"used": u, "limit": FREE_LIFETIME_LIMIT,
+                           "left": max(FREE_LIFETIME_LIMIT - u, 0), "period": "total", "resets_at": None}
         if symbol in symbols:
-            return doc, Reservation(symbol, kind, counted=False, quota=quota)
+            return doc, Reservation(symbol, kind, counted=False, quota=quota(used))
         if used >= FREE_LIFETIME_LIMIT:
-            raise QuotaExceeded(402, {"code": "PAYWALL", "feature": "ondemand", "ondemand": quota})
-        used += 1
-        doc["ondemand_used"] = used
+            raise QuotaExceeded(402, {"code": "PAYWALL", "feature": "ondemand", "ondemand": quota(used)})
+        doc["ondemand_used"] = used + 1
         symbols[symbol] = "pending"
-        quota = {"used": used, "limit": FREE_LIFETIME_LIMIT, "left": FREE_LIFETIME_LIMIT - used}
-        return doc, Reservation(symbol, kind, counted=True, quota=quota)
+        return doc, Reservation(symbol, kind, counted=True, quota=quota(used + 1))
 
-    if kind == "daily":
-        today = now.astimezone(ET).date().isoformat()
-        count = int(doc.get("ondemand_today", 0) or 0) if doc.get("ondemand_day") == today else 0
-        quota = {"used_today": count, "daily_limit": DAILY_FAIR_USE_LIMIT}
+    if kind == "weekly":
+        week = week_key(now)
+        used = week_used(doc, now)
+        resets = week_resets_at(now).isoformat()
+        quota = lambda u: {"used": u, "limit": WEEKLY_LIMIT, "left": max(WEEKLY_LIMIT - u, 0),
+                           "period": "week", "resets_at": resets}
         if symbol in symbols:
-            return doc, Reservation(symbol, kind, counted=False, quota=quota)
-        if count >= DAILY_FAIR_USE_LIMIT:
-            raise QuotaExceeded(429, {"code": "DAILY_LIMIT", "feature": "ondemand", "daily_limit": DAILY_FAIR_USE_LIMIT})
-        doc["ondemand_day"] = today
-        doc["ondemand_today"] = count + 1
+            return doc, Reservation(symbol, kind, counted=False, quota=quota(used))
+        if used >= WEEKLY_LIMIT:
+            raise QuotaExceeded(429, {"code": "WEEKLY_LIMIT", "feature": "ondemand", "ondemand": quota(used)})
+        doc["ondemand_week"] = week
+        doc["ondemand_week_count"] = used + 1
         symbols[symbol] = "pending"
-        return doc, Reservation(symbol, kind, counted=True,
-                                quota={"used_today": count + 1, "daily_limit": DAILY_FAIR_USE_LIMIT})
+        return doc, Reservation(symbol, kind, counted=True, quota=quota(used + 1))
 
     return doc, Reservation(symbol, "none", counted=False)
 
@@ -127,10 +149,10 @@ class UsageService:
         if not self._flags.is_enabled("paywall", uid):
             return "none", {}
         access = self._access.get_access(uid, use_cache=False)
-        if access["plan"] == "admin":
+        if access["plan"] == "admin" or access.get("role") == "admin":
             return "none", access
         if access["plan"] in FULL_PLANS:
-            return "daily", access
+            return "weekly", access
         return "lifetime", access
 
     def _transact(self, uid: str, fn):
@@ -154,7 +176,7 @@ class UsageService:
         if kind == "none" or self._db is None:
             return Reservation(symbol, "none", counted=False)
         try:
-            res = self._transact(uid, lambda doc: decide(doc, kind, symbol, self._now()))
+            res = self._transact(uid, lambda doc: decide(doc, kind, symbol, self._now(), access.get("plan", "free")))
         except QuotaExceeded as e:
             e.detail.setdefault("plan", access.get("plan"))
             e.detail.setdefault("trial_ends_at", access.get("trial_ends_at"))
@@ -193,8 +215,8 @@ class UsageService:
             doc["ondemand_symbols"] = symbols
             if res.kind == "lifetime":
                 doc["ondemand_used"] = max(int(doc.get("ondemand_used", 0) or 0) - 1, 0)
-            elif res.kind == "daily":
-                doc["ondemand_today"] = max(int(doc.get("ondemand_today", 0) or 0) - 1, 0)
+            elif res.kind == "weekly" and doc.get("ondemand_week") == week_key(self._now()):
+                doc["ondemand_week_count"] = max(int(doc.get("ondemand_week_count", 0) or 0) - 1, 0)
             return doc, None
 
         self._transact(uid, fn)
