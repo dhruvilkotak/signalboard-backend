@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from services.usage_service import (
-    FREE_LIFETIME_LIMIT, WEEKLY_LIMIT, QuotaExceeded, Reservation, UsageService, decide, week_key, week_resets_at, week_used,
+    FREE_LIFETIME_LIMIT, WEEKLY_LIMIT, QuotaExceeded, Reservation, UsageService, decide, peek_decision, week_key, week_resets_at, week_used,
 )
 
 # Thursday 2026-11-12, 1pm ET
@@ -138,3 +138,46 @@ def test_no_db_reserve_is_uncounted():
     assert res == Reservation("AAPL", "none", counted=False)
     svc.release("u", res)
     svc.confirm("u", res, LATER)
+
+
+# ── peek (read-only preview for the UI) ───────────────────────────────────
+
+def test_peek_none_is_unlimited():
+    assert peek_decision(used(99), "none", "AAPL", NOW)["status"] == "unlimited"
+
+
+def test_peek_weekly_new_symbol_uses_one_and_reports_current_count():
+    p = peek_decision(used(2), "weekly", "AAPL", NOW)
+    assert p["status"] == "uses_one"
+    assert p["quota"]["used"] == 2 and p["quota"]["left"] == 3 and p["quota"]["period"] == "week"
+
+
+def test_peek_review_is_free():
+    p = peek_decision(used(5, {"AAPL": LATER}), "weekly", "AAPL", NOW)
+    assert p["status"] == "free" and p["quota"]["left"] == 0
+
+
+def test_peek_lifetime_blocked_is_paywall():
+    p = peek_decision({"ondemand_used": 5}, "lifetime", "MSFT", NOW)
+    assert p["status"] == "blocked" and p["code"] == "PAYWALL" and p["quota"]["left"] == 0
+
+
+def test_peek_weekly_blocked_is_weekly_limit():
+    p = peek_decision(used(5), "weekly", "MSFT", NOW)
+    assert p["status"] == "blocked" and p["code"] == "WEEKLY_LIMIT"
+
+
+def test_peek_lifetime_fresh_user():
+    p = peek_decision({}, "lifetime", "MSFT", NOW)
+    assert p["status"] == "uses_one" and p["quota"] == {
+        "used": 0, "limit": FREE_LIFETIME_LIMIT, "left": 5, "period": "total", "resets_at": None}
+
+
+def test_peek_does_not_mutate_input():
+    doc = {"ondemand_used": 1, "ondemand_symbols": {}}
+    peek_decision(doc, "lifetime", "MSFT", NOW)
+    assert doc == {"ondemand_used": 1, "ondemand_symbols": {}}
+
+
+def test_no_db_peek_is_unlimited():
+    assert UsageService(Access("free"), Flags(True)).peek("u", "aapl")["status"] == "unlimited"

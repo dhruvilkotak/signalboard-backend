@@ -3,14 +3,13 @@ services/ondemand_signal_service.py
 
 On-demand signal service for Live Prices → AI Signal tab.
 Uses SignalEngine for identical signal generation as signal_service.py.
-Writes to Firestore signals_ondemand/{symbol} with session-based TTL.
-Shared cache — one Claude call per ticker per session across ALL users.
+Writes to Firestore signals_ondemand/{symbol}.
+Shared cache — one Claude call per ticker per day across ALL users.
 
-TTL strategy (session-based, not flat 24h):
-  pre_market  signal → expires when market opens  (9:30am ET)
-  market      signal → expires when market closes (4:00pm ET)
-  post_market signal → expires next pre-market    (4:00am ET next day)
-  closed      signal → expires next pre-market    (4:00am ET next day)
+TTL: every on-demand signal expires at 11:59 PM ET on the day it was generated
+(DAILY_RESET_ET), whatever time it was made. The per-user quota
+(services/usage_service.py) uses the same expires_at: a user's first view of a
+symbol each day counts even if another user generated it; re-views that day are free.
 """
 
 import logging
@@ -25,27 +24,19 @@ CACHE_TTL_HOURS = 24   # fallback only
 ET = ZoneInfo("America/New_York")
 
 
-def _session_expiry() -> datetime:
-    """
-    Return the UTC datetime when the current signal should expire.
-    Signals expire at the end of the current market session.
-    """
-    now_et = datetime.now(ET)
-    hour   = now_et.hour
+DAILY_RESET_ET = (23, 59)   # (hour, minute) ET — all on-demand signals reset nightly
 
-    if 4 <= hour < 9:
-        # Pre-market → expires at market open 9:30am ET today
-        exp_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-    elif 9 <= hour < 16:
-        # Market hours → expires at close 4:00pm ET today
-        exp_et = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-    elif 16 <= hour < 20:
-        # Post-market → expires at 4:00am ET next day (next pre-market)
-        exp_et = (now_et + timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
-    else:
-        # Overnight closed → expires at 4:00am ET next day
-        exp_et = (now_et + timedelta(days=1)).replace(hour=4, minute=0, second=0, microsecond=0)
 
+def _session_expiry(now=None) -> datetime:
+    """
+    UTC datetime when a signal generated at `now` expires: 11:59 PM ET the same day
+    (the next day's 11:59 PM if generated in the last minute of the day).
+    """
+    now_et = (now or datetime.now(timezone.utc)).astimezone(ET)
+    h, m = DAILY_RESET_ET
+    exp_et = now_et.replace(hour=h, minute=m, second=0, microsecond=0)
+    if exp_et <= now_et:
+        exp_et = (now_et + timedelta(days=1)).replace(hour=h, minute=m, second=0, microsecond=0)
     return exp_et.astimezone(timezone.utc)
 
 
