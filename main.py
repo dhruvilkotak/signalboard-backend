@@ -312,7 +312,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(price_spike_job,    "interval", seconds=30,  id="price_spike_resignal")
     scheduler.add_job(auto_trader_svc.stop_loss_monitor, "interval", seconds=60, id="stop_loss_monitor")
     scheduler.add_job(rate_limiter.clear_expired, "interval", minutes=5, id="rate_limiter_cleanup")
-    scheduler.add_job(access_expiry_job,  "interval", minutes=15,  id="access_expiry")
+    # Trial/coupon/subscription expiry → pause + sell Auto-Trader holdings, once per
+    # trading day. Failures retry next day; after 2 retries: job_failures doc + alert.
+    # Manual run: scripts/run_access_expiry.py (docs/runbooks/autotrader-liquidation.md)
+    scheduler.add_job(access_expiry_job,
+        CronTrigger(day_of_week="mon-fri", hour=9, minute=45, timezone="America/New_York"),
+        id="access_expiry", misfire_grace_time=3600, coalesce=True)
     for hour, minute in [(4,0),(6,0),(8,0),(9,0)]:
         scheduler.add_job(pre_market_signal_job,
             CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone="America/New_York"),

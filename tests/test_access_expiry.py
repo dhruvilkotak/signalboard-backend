@@ -38,6 +38,9 @@ class AccessDoc:
         cur.update(data)
         self.store["access"] = cur
 
+    def add(self, record):                     # job_failures
+        self.store.setdefault("job_failures", []).append(record)
+
 
 class DB:
     def __init__(self):
@@ -51,6 +54,7 @@ class Portfolio:
     def __init__(self, strategies):
         self.strategies = strategies          # {sk: {"is_paused": bool}}
         self.calls = []
+        self.fail = set()                     # strategy keys whose stop_strategy raises
 
     async def get_all_strategies(self, uid):
         return {k: dict(v) for k, v in self.strategies.items()}
@@ -61,6 +65,8 @@ class Portfolio:
 
     async def stop_strategy(self, uid, sk, prices, trigger="stop_strategy"):
         self.calls.append(("stop", sk, trigger))
+        if sk in self.fail:
+            raise RuntimeError("alpaca down")
         self.strategies.pop(sk)
         return {"positions_closed": 2, "returned": 500.0}
 
@@ -98,8 +104,10 @@ def make(autotrader=False, flag=True, trading=True, strategies=None):
     portfolio = Portfolio(strategies if strategies is not None else
                           {"moderate": {"is_paused": False}, "aggressive": {"is_paused": True}})
     db = DB()
+    alerts = []
     svc = AccessExpiryService(portfolio, Prices(), Access(autotrader), Flags(flag), db=db,
-                              trading_allowed=lambda: trading)
+                              trading_allowed=lambda: trading, alert=alerts.append)
+    svc.alerts = alerts
     return svc, portfolio, db
 
 
@@ -151,3 +159,87 @@ def test_access_regained_restores_only_what_we_paused():
 def test_no_strategies_is_noop():
     svc, p, _ = make(strategies={})
     assert run(svc.reconcile("u")) == "none" and p.calls == []
+
+
+# ── once a day: retry next day, give up after 2 retries ───────────────────
+
+def test_failure_retries_next_run_then_gives_up_after_two_retries():
+    svc, p, db = make()
+    p.fail = {"moderate"}
+    assert run(svc.reconcile("u")) == "retry"                 # day 1: attempt 1
+    st = db.store["access"]
+    assert st["liquidation_attempts"] == 1 and st["liquidation_failed"] is False
+    assert "aggressive" not in p.strategies                   # the healthy one was sold
+    assert st["last_partial_liquidation"]["strategies"] == ["aggressive"]
+    assert p.strategies["moderate"]["is_paused"] is True      # failed one stays paused
+    assert svc.alerts == []
+
+    assert run(svc.reconcile("u")) == "retry"                 # day 2: retry 1
+    assert run(svc.reconcile("u")) == "failed"                # day 3: retry 2 -> give up
+    st = db.store["access"]
+    assert st["liquidation_attempts"] == 3 and st["liquidation_failed"] is True
+    assert "alpaca down" in st["last_liquidation_error"]
+    assert len(svc.alerts) == 1 and svc.alerts[0]["uid"] == "u" and svc.alerts[0]["attempts"] == 3
+    assert len(db.store["job_failures"]) == 1
+
+    stops_before = len([c for c in p.calls if c[0] == "stop"])
+    assert run(svc.reconcile("u")) == "failed"                # day 4: skipped, no new alert
+    assert len([c for c in p.calls if c[0] == "stop"]) == stops_before
+    assert len(svc.alerts) == 1
+
+
+def test_success_after_a_failure_clears_attempts():
+    svc, p, db = make()
+    p.fail = {"moderate"}
+    run(svc.reconcile("u"))
+    p.fail = set()
+    assert run(svc.reconcile("u")) == "liquidated"
+    st = db.store["access"]
+    assert st["liquidation_attempts"] == 0 and st["liquidation_failed"] is False
+    assert st["last_liquidation"]["attempts"] == 2
+
+
+def test_reset_lets_admin_retry_with_fresh_attempts():
+    svc, p, db = make()
+    p.fail = {"moderate"}
+    for _ in range(3):
+        run(svc.reconcile("u"))
+    assert db.store["access"]["liquidation_failed"] is True
+    db.store["access"].update({"liquidation_failed": False, "liquidation_attempts": 0})   # what reset_failure writes
+    p.fail = set()
+    assert run(svc.reconcile("u")) == "liquidated"
+
+
+def test_whole_step_exception_counts_as_attempt():
+    svc, p, db = make()
+    async def boom():
+        raise RuntimeError("prices unavailable")
+    svc.prices.get_all = boom
+    assert run(svc.reconcile("u")) == "retry"
+    assert "prices unavailable" in db.store["access"]["last_liquidation_error"]
+
+
+def test_regaining_access_clears_failed_state():
+    svc, p, db = make()
+    p.fail = {"moderate"}
+    for _ in range(3):
+        run(svc.reconcile("u"))
+    svc.access = Access(autotrader=True)
+    assert run(svc.reconcile("u")) == "restored"
+    assert db.store["access"]["liquidation_failed"] is False
+    assert p.strategies["moderate"]["is_paused"] is False
+
+
+def test_run_job_level_failure_alerts():
+    svc, p, db = make()
+    def broken():
+        raise RuntimeError("firestore down")
+    svc._uids_with_strategies = broken
+    with pytest.raises(RuntimeError):
+        run(svc.run())
+    assert svc.alerts and svc.alerts[0]["status"] == "job_failed"
+
+
+def test_run_for_specific_uids():
+    svc, p, db = make()
+    assert run(svc.run(["u"])) == {"users": 1, "liquidated": 1}
