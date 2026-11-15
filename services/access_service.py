@@ -7,7 +7,8 @@ AccessService — the single place that decides what a user can use.
 Precedence (first match wins):
     1. admin role                          -> everything
     2. pro role   (flag: pro_role)         -> every user feature
-    3. paid subscription (active/trialing) -> every user feature
+    3. paid: subscription active/trialing,
+       or a one-time pass (paid_until)     -> every user feature
     4. coupon_until in the future          -> every user feature
     5. trial_ends_at in the future         -> ai_signals, ai_chat, autotrader
     6. free                                -> no AI features
@@ -209,6 +210,7 @@ class AccessService:
         trial_ends_at = _as_utc(access_doc.get("trial_ends_at"))
         coupon_until = _as_utc(access_doc.get("coupon_until"))
         sub_status = sub_doc.get("status")
+        paid_until = _as_utc(sub_doc.get("paid_until"))          # one-time pass
         from services.usage_service import FREE_LIFETIME_LIMIT, WEEKLY_LIMIT, week_resets_at, week_used
         lifetime_used = int(usage_doc.get("ondemand_used", 0) or 0)
         weekly_used = week_used(usage_doc, now)
@@ -241,8 +243,8 @@ class AccessService:
             return full("admin")
         if role == "pro" and self._flags.is_enabled("pro_role", uid):
             return full("pro")
-        if sub_status in ACTIVE_SUB_STATUSES:
-            return full("paid")
+        if sub_status in ACTIVE_SUB_STATUSES or (paid_until and paid_until > now):
+            return {**full("paid"), "paid_until": _iso(paid_until) if paid_until and paid_until > now else None}
         if coupon_until and coupon_until > now:
             return full("coupon")
 
@@ -278,5 +280,6 @@ class AccessService:
             "trial_ends_at": _iso(trial_ends_at),
             "coupon_until": _iso(coupon_until),
             "subscription_status": sub_status,
+            "paid_until": None,                # one-time pass end (set for plan "paid" via a pass)
             "liquidation": liquidation or {"pending": False, "last": None},   # Auto-Trader access-expiry state
         }

@@ -197,3 +197,16 @@ def test_invalid_role_rejected():
         svc().set_role("u", "admin", actor_uid="a")
     with pytest.raises(ValueError):
         svc().set_role(ADMIN_UID, "user", actor_uid="a")
+
+
+def test_one_time_pass_is_paid_until_it_ends():
+    until = NOW + timedelta(days=10)
+    a = svc(Flags(paywall=True, trial=True), subscription={"paid_until": until}).get_access("u")
+    assert a["plan"] == "paid" and a["features"] == ALL
+    assert a["paid_until"] == until.isoformat().replace("+00:00", "Z") or a["paid_until"].startswith("2026-11-17")
+    assert a["ondemand"]["period"] == "week"
+
+
+def test_expired_pass_is_free():
+    a = svc(Flags(paywall=True, trial=True), subscription={"paid_until": NOW - timedelta(minutes=1)}).get_access("u")
+    assert a["plan"] == "free" and a["paid_until"] is None

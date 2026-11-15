@@ -1,22 +1,35 @@
 """
-BillingService — Stripe Checkout (subscribe), Customer Portal (manage/cancel)
-and webhooks (the ONLY thing that changes subscription status).
+BillingService — Stripe Checkout, Customer Portal (manage/cancel anytime) and
+webhooks (the ONLY thing that changes what a user has paid for).
 
-Env (systemd EnvironmentFile; test keys until launch):
+Plans (each offered only if its price is configured):
+    monthly  recurring monthly subscription            STRIPE_PRICE_MONTHLY (or STRIPE_PRICE_ID)
+    annual   recurring yearly subscription (15% off)   STRIPE_PRICE_ANNUAL
+    pass     one-time payment, N days, no auto-renew   STRIPE_PRICE_PASS, STRIPE_PASS_DAYS (30)
+Subscriptions are cancelled in the Customer Portal and keep access until the
+end of the paid period. Prices themselves (amounts, the 15% annual discount,
+fees passed to the customer) are set in Stripe; see docs/stripe-setup.md.
+
+Env (in .env; sandbox keys until launch):
     STRIPE_SECRET_KEY        sk_test_... / sk_live_...
     STRIPE_WEBHOOK_SECRET    whsec_...
-    STRIPE_PRICE_ID          price_... ($20/month recurring)
+    STRIPE_PRICE_MONTHLY / STRIPE_PRICE_ANNUAL / STRIPE_PRICE_PASS   price_...
+    STRIPE_PASS_DAYS         days a one-time pass lasts (default 30)
+    STRIPE_AUTOMATIC_TAX     "1" = Stripe Tax adds sales tax on top of the price
+                             (needs Stripe Tax set up + prices "exclusive" of tax)
     FRONTEND_URL             https://signalboard-frontend.vercel.app
     STRIPE_TOS_CONSENT       "1" to require the Terms checkbox in Checkout
                              (needs a Terms URL in Stripe → Settings → Public details)
 
 Firestore (server-only):
     users/{uid}/data/subscription   stripe_customer_id, subscription_id, status,
-                                    current_period_end, cancel_at_period_end, price_id
+                                    current_period_end, cancel_at_period_end, price_id,
+                                    paid_until, last_pass (one-time passes)
     billing_customers/{cus_id}      uid                (customer → user lookup)
     billing_events/{evt_id}         type, processed_at (webhook idempotency)
 
-AccessService treats status "active" / "trialing" as plan "paid". When a
+AccessService treats status "active" / "trialing", or paid_until in the
+future, as plan "paid". When a
 subscription ends, the access_expiry job handles the Auto-Trader like any
 other loss of access.
 """
@@ -25,7 +38,8 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import stripe
@@ -36,6 +50,8 @@ from firebase_admin import firestore
 logger = logging.getLogger(__name__)
 
 ACTIVE = ("active", "trialing")
+PLANS = ("monthly", "annual", "pass")
+PRICE_CACHE_SECONDS = 600
 
 
 class BillingError(Exception):
@@ -76,7 +92,14 @@ class BillingService:
         self._db = db
         self.stripe = stripe_module
         self.stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
-        self.price_id = os.getenv("STRIPE_PRICE_ID")
+        self.prices = {k: v for k, v in {
+            "monthly": os.getenv("STRIPE_PRICE_MONTHLY") or os.getenv("STRIPE_PRICE_ID"),
+            "annual": os.getenv("STRIPE_PRICE_ANNUAL"),
+            "pass": os.getenv("STRIPE_PRICE_PASS"),
+        }.items() if v}
+        self.pass_days = int(os.getenv("STRIPE_PASS_DAYS", "30") or 30)
+        self.automatic_tax = os.getenv("STRIPE_AUTOMATIC_TAX", "") == "1"
+        self._price_cache: dict = {}
         self.webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
         self.frontend = os.getenv("FRONTEND_URL", "https://signalboard-frontend.vercel.app").rstrip("/")
         self.tos_consent = os.getenv("STRIPE_TOS_CONSENT", "") == "1"
@@ -89,9 +112,38 @@ class BillingService:
         key = self.stripe.api_key or ""
         return "live" if key.startswith("sk_live") else "test" if key.startswith("sk_test") else "unconfigured"
 
+    @property
+    def price_id(self) -> Optional[str]:            # monthly; kept for older callers
+        return self.prices.get("monthly")
+
     def _need(self):
-        if self._db is None or not self.stripe.api_key or not self.price_id:
+        if self._db is None or not self.stripe.api_key or not self.prices:
             raise BillingError("BILLING_UNAVAILABLE", "Billing isn't configured yet.", 503)
+
+    def plans(self) -> list[dict]:
+        """Configured plans with their Stripe amounts, for the paywall. Cached 10 min."""
+        out = []
+        for plan in PLANS:
+            pid = self.prices.get(plan)
+            if not pid:
+                continue
+            cached = self._price_cache.get(pid)
+            if not cached or time.time() - cached[0] > PRICE_CACHE_SECONDS:
+                try:
+                    price = self.stripe.Price.retrieve(pid)
+                except StripeError as e:
+                    logger.warning("stripe_price_lookup_failed", extra={"event": "stripe_price_lookup_failed",
+                                                                        "plan": plan, "stripe_message": str(e)})
+                    continue
+                recurring = _get(price, "recurring") or {}
+                cached = (time.time(), {
+                    "amount": _get(price, "unit_amount"),          # cents
+                    "currency": _get(price, "currency", "usd"),
+                    "interval": _get(recurring, "interval"),       # month | year | None (one-time)
+                })
+                self._price_cache[pid] = cached
+            out.append({"id": plan, **cached[1], "days": self.pass_days if plan == "pass" else None})
+        return out
 
     # ── Firestore helpers ────────────────────────────────────────────────
 
@@ -147,36 +199,50 @@ class BillingService:
                                             "request_id": getattr(e, "request_id", None), "stripe_message": str(e)})
         return BillingError("STRIPE_ERROR", f"Couldn't {action}: {msg}", 502)
 
-    def create_checkout(self, uid: str, email: Optional[str]) -> str:
+    def create_checkout(self, uid: str, email: Optional[str], plan: str = "monthly") -> str:
         self._need()
+        if plan not in self.prices:
+            raise BillingError("UNKNOWN_PLAN", f"The {plan} plan isn't available.", 400)
         if self._get_sub(uid).get("status") in ACTIVE:
             raise BillingError("ALREADY_SUBSCRIBED", "You already have an active subscription.", 409)
         try:
             customer = self._customer_for(uid, email)
             try:
-                session = self.stripe.checkout.Session.create(**self._checkout_params(uid, customer))
+                session = self.stripe.checkout.Session.create(**self._checkout_params(uid, customer, plan))
             except StripeError as e:
                 if getattr(e, "code", None) != "resource_missing" or getattr(e, "param", None) != "customer":
                     raise
                 # Stored customer is gone (deleted, or from the other mode): make a new one once.
                 customer = self._customer_for(uid, email, fresh=True)
-                session = self.stripe.checkout.Session.create(**self._checkout_params(uid, customer))
+                session = self.stripe.checkout.Session.create(**self._checkout_params(uid, customer, plan))
         except StripeError as e:
             raise self._stripe_failed("start checkout", uid, e)
-        logger.info("checkout_started", extra={"event": "checkout_started", "uid": uid, "mode": self.mode})
+        logger.info("checkout_started", extra={"event": "checkout_started", "uid": uid, "mode": self.mode,
+                                               "plan": plan})
         return session["url"]
 
-    def _checkout_params(self, uid: str, customer: str) -> dict:
+    def _checkout_params(self, uid: str, customer: str, plan: str = "monthly") -> dict:
+        meta = {"uid": uid, "plan": plan}
         params = {
-            "mode": "subscription",
             "customer": customer,
-            "line_items": [{"price": self.price_id, "quantity": 1}],
+            "line_items": [{"price": self.prices[plan], "quantity": 1}],
             "client_reference_id": uid,
-            "subscription_data": {"metadata": {"uid": uid}},
-            "allow_promotion_codes": True,
+            "metadata": meta,
             "success_url": f"{self.frontend}/?billing=success",
             "cancel_url": f"{self.frontend}/?billing=cancel",
         }
+        if plan == "pass":
+            params["mode"] = "payment"
+            params["payment_intent_data"] = {"metadata": {**meta, "days": str(self.pass_days)}}
+        else:
+            params["mode"] = "subscription"
+            params["subscription_data"] = {"metadata": meta}
+            params["allow_promotion_codes"] = True
+        if self.automatic_tax:
+            # Sales tax is added on top (prices are tax-exclusive); Stripe needs the address.
+            params["automatic_tax"] = {"enabled": True}
+            params["billing_address_collection"] = "required"
+            params["customer_update"] = {"address": "auto", "name": "auto"}
         if self.tos_consent:
             params["consent_collection"] = {"terms_of_service": "required"}
         return params
@@ -234,6 +300,10 @@ class BillingService:
                 return "ignored_no_uid"
             if customer:
                 self._link_customer(uid, customer)
+            if _get(obj, "mode") == "payment":
+                if _get(obj, "payment_status") != "paid":
+                    return "pass_unpaid"
+                return self._grant_pass(uid, obj)
             if sub_id:
                 self._write_subscription(uid, self.stripe.Subscription.retrieve(sub_id))
             return "checkout_completed"
@@ -261,6 +331,11 @@ class BillingService:
             uid = self._uid_for_customer(customer)
             if not uid:
                 return "ignored_unknown_customer"
+            pi_id = _get(obj, "payment_intent")
+            if pi_id:
+                pi_meta = _get(self.stripe.PaymentIntent.retrieve(pi_id), "metadata", {}) or {}
+                if _get(pi_meta, "plan") == "pass":
+                    return self._revoke_pass(uid, pi_id)
             subs = self.stripe.Subscription.list(customer=customer, status="active")
             for sub in _get(subs, "data", []) or []:
                 self.stripe.Subscription.cancel(sub["id"])     # .deleted webhook syncs the status
@@ -268,3 +343,34 @@ class BillingService:
             return "refund_cancelled"
 
         return "ignored"
+
+    # ── one-time pass ────────────────────────────────────────────────────
+
+    def _grant_pass(self, uid: str, session) -> str:
+        """Paid one-time pass: extend paid_until by N days (from now, or from the current end)."""
+        meta = _get(session, "metadata", {}) or {}
+        days = int(_get(meta, "days") or self.pass_days)
+        now = datetime.now(timezone.utc)
+        current = self._get_sub(uid).get("paid_until")
+        if isinstance(current, str):
+            current = datetime.fromisoformat(current.replace("Z", "+00:00"))
+        start = current if current and current > now else now
+        until = start + timedelta(days=days)
+        self._sub_ref(uid).set({
+            "paid_until": until,
+            "last_pass": {"at": now, "days": days, "payment_intent": _get(session, "payment_intent"),
+                          "amount_total": _get(session, "amount_total")},
+            "updated_at": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        self._access.invalidate(uid)
+        logger.info("pass_granted", extra={"event": "pass_granted", "uid": uid, "days": days,
+                                           "paid_until": until.isoformat()})
+        return "pass_granted"
+
+    def _revoke_pass(self, uid: str, payment_intent: str) -> str:
+        """Fully refunded pass: access ends now."""
+        self._sub_ref(uid).set({"paid_until": datetime.now(timezone.utc),
+                                "updated_at": firestore.SERVER_TIMESTAMP}, merge=True)
+        self._access.invalidate(uid)
+        logger.info("pass_refunded", extra={"event": "pass_refunded", "uid": uid, "payment_intent": payment_intent})
+        return "pass_refunded"
