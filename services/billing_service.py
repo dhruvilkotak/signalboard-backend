@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import stripe
+
+StripeError = getattr(stripe, "StripeError", None) or stripe.error.StripeError
 from firebase_admin import firestore
 
 logger = logging.getLogger(__name__)
@@ -107,8 +109,8 @@ class BillingService:
         return (snap.to_dict() or {}).get("uid") if snap.exists else None
 
     def _link_customer(self, uid: str, customer_id: str) -> None:
-        self._db.collection("billing_customers").document(customer_id).set({"uid": uid})
-        self._sub_ref(uid).set({"stripe_customer_id": customer_id}, merge=True)
+        self._db.collection("billing_customers").document(customer_id).set({"uid": uid, "mode": self.mode})
+        self._sub_ref(uid).set({"stripe_customer_id": customer_id, "stripe_customer_mode": self.mode}, merge=True)
 
     def _write_subscription(self, uid: str, sub) -> dict:
         doc = {**subscription_doc(sub), "updated_at": firestore.SERVER_TIMESTAMP}
@@ -123,19 +125,48 @@ class BillingService:
 
     # ── user actions ─────────────────────────────────────────────────────
 
-    def _customer_for(self, uid: str, email: Optional[str]) -> str:
-        existing = self._get_sub(uid).get("stripe_customer_id")
-        if existing:
+    def _customer_for(self, uid: str, email: Optional[str], fresh: bool = False) -> str:
+        sub = self._get_sub(uid)
+        existing = sub.get("stripe_customer_id")
+        # A customer made with the live key doesn't exist in sandbox (and vice versa).
+        same_mode = sub.get("stripe_customer_mode") in (None, self.mode)
+        if existing and same_mode and not fresh:
             return existing
         customer = self.stripe.Customer.create(email=email, metadata={"uid": uid})
         self._link_customer(uid, customer["id"])
+        logger.info("stripe_customer_created", extra={"event": "stripe_customer_created", "uid": uid,
+                                                      "mode": self.mode, "replaced": existing})
         return customer["id"]
+
+    def _stripe_failed(self, action: str, uid: str, e: Exception) -> BillingError:
+        """Log Stripe's real reason; return a readable error instead of a 500."""
+        msg = getattr(e, "user_message", None) or str(e) or type(e).__name__
+        logger.error("stripe_error", extra={"event": "stripe_error", "action": action, "uid": uid,
+                                            "mode": self.mode, "type": type(e).__name__,
+                                            "code": getattr(e, "code", None),
+                                            "request_id": getattr(e, "request_id", None), "stripe_message": str(e)})
+        return BillingError("STRIPE_ERROR", f"Couldn't {action}: {msg}", 502)
 
     def create_checkout(self, uid: str, email: Optional[str]) -> str:
         self._need()
         if self._get_sub(uid).get("status") in ACTIVE:
             raise BillingError("ALREADY_SUBSCRIBED", "You already have an active subscription.", 409)
-        customer = self._customer_for(uid, email)
+        try:
+            customer = self._customer_for(uid, email)
+            try:
+                session = self.stripe.checkout.Session.create(**self._checkout_params(uid, customer))
+            except StripeError as e:
+                if getattr(e, "code", None) != "resource_missing" or getattr(e, "param", None) != "customer":
+                    raise
+                # Stored customer is gone (deleted, or from the other mode): make a new one once.
+                customer = self._customer_for(uid, email, fresh=True)
+                session = self.stripe.checkout.Session.create(**self._checkout_params(uid, customer))
+        except StripeError as e:
+            raise self._stripe_failed("start checkout", uid, e)
+        logger.info("checkout_started", extra={"event": "checkout_started", "uid": uid, "mode": self.mode})
+        return session["url"]
+
+    def _checkout_params(self, uid: str, customer: str) -> dict:
         params = {
             "mode": "subscription",
             "customer": customer,
@@ -148,16 +179,17 @@ class BillingService:
         }
         if self.tos_consent:
             params["consent_collection"] = {"terms_of_service": "required"}
-        session = self.stripe.checkout.Session.create(**params)
-        logger.info("checkout_started", extra={"event": "checkout_started", "uid": uid, "mode": self.mode})
-        return session["url"]
+        return params
 
     def create_portal(self, uid: str) -> str:
         self._need()
         customer = self._get_sub(uid).get("stripe_customer_id")
         if not customer:
             raise BillingError("NO_CUSTOMER", "No billing account yet. Subscribe first.", 404)
-        session = self.stripe.billing_portal.Session.create(customer=customer, return_url=f"{self.frontend}/")
+        try:
+            session = self.stripe.billing_portal.Session.create(customer=customer, return_url=f"{self.frontend}/")
+        except StripeError as e:
+            raise self._stripe_failed("open the billing portal", uid, e)
         return session["url"]
 
     # ── webhooks ─────────────────────────────────────────────────────────

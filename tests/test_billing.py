@@ -134,7 +134,7 @@ def test_mode():
 def test_checkout_creates_customer_once_and_uses_price():
     svc, db, s = make()
     assert svc.create_checkout("u1", "a@b.c") == "https://checkout.stripe.test/s"
-    assert db.store["billing_customers/cus_1"] == {"uid": "u1"}
+    assert db.store["billing_customers/cus_1"] == {"uid": "u1", "mode": "test"}
     kw = [c for c in s.calls if c[0] == "checkout"][0][1]
     assert kw["line_items"] == [{"price": "price_20", "quantity": 1}]
     assert kw["client_reference_id"] == "u1" and kw["success_url"] == "https://app.test/?billing=success"
@@ -213,3 +213,52 @@ def test_webhook_signature_real_verification():
     with pytest.raises(BillingError) as e:
         svc.construct_event(payload, f"t={ts},v1=deadbeef")
     assert e.value.code == "BAD_SIGNATURE"
+
+
+# ── Stripe errors become readable 502s, not 500s ──────────────────────────
+
+def test_stripe_error_on_checkout_is_502_with_reason():
+    svc, db, s = make()
+    def boom(**kw):
+        raise bs.stripe.InvalidRequestError("No such price: 'price_20'", "line_items[0][price]",
+                                            code="resource_missing")
+    s.checkout.Session.create = boom
+    with pytest.raises(BillingError) as e:
+        svc.create_checkout("u1", "a@b.c")
+    assert e.value.status == 502 and e.value.code == "STRIPE_ERROR"
+    assert "No such price" in e.value.message
+
+
+def test_missing_customer_is_recreated_once():
+    svc, db, s = make()
+    db.store["users/u1/data/subscription"] = {"stripe_customer_id": "cus_old"}
+    tries = []
+    def create(**kw):
+        tries.append(kw["customer"])
+        if kw["customer"] == "cus_old":
+            raise bs.stripe.InvalidRequestError("No such customer: 'cus_old'", "customer", code="resource_missing")
+        return {"url": "https://checkout.stripe.test/s"}
+    s.checkout.Session.create = create
+    assert svc.create_checkout("u1", "a@b.c").startswith("https://checkout")
+    assert tries == ["cus_old", "cus_1"]
+    assert db.store["users/u1/data/subscription"]["stripe_customer_id"] == "cus_1"
+
+
+def test_customer_from_other_mode_is_replaced():
+    svc, db, s = make()                                       # sk_test
+    db.store["users/u1/data/subscription"] = {"stripe_customer_id": "cus_live", "stripe_customer_mode": "live"}
+    svc.create_checkout("u1", "a@b.c")
+    kw = [c for c in s.calls if c[0] == "checkout"][0][1]
+    assert kw["customer"] == "cus_1"
+    assert db.store["users/u1/data/subscription"]["stripe_customer_mode"] == "test"
+
+
+def test_portal_stripe_error_is_502():
+    svc, db, s = make()
+    db.store["users/u1/data/subscription"] = {"stripe_customer_id": "cus_1"}
+    def boom(**kw):
+        raise bs.stripe.InvalidRequestError("You can't create a portal session in test mode until you save your customer portal settings", None)
+    s.billing_portal.Session.create = boom
+    with pytest.raises(BillingError) as e:
+        svc.create_portal("u1")
+    assert e.value.status == 502 and "portal" in e.value.message
