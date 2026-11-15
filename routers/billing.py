@@ -2,7 +2,8 @@
 Billing endpoints. Include with NO prefix (paths are full).
 
     GET  /api/billing/status            user   {enabled, mode}
-    POST /api/billing/checkout-session  user   -> {"url"}   (flag: billing)
+    GET  /api/billing/status            user   -> {enabled, mode, plans[], tax_added}
+    POST /api/billing/checkout-session  user   {plan: monthly|annual|pass} -> {"url"}   (flag: billing)
     POST /api/billing/portal-session    user   -> {"url"}
     POST /api/billing/webhook           Stripe signature, raw body, NO auth
 
@@ -12,8 +13,11 @@ Keep /api/billing/webhook out of nginx rate-limit zones so Stripe retries land.
 
 import logging
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from pydantic import BaseModel
 
 from middleware.auth import get_current_user
 from services.billing_service import BillingError
@@ -33,16 +37,24 @@ def _require_flag(uid: str):
         raise HTTPException(status_code=403, detail={"code": "BILLING_DISABLED", "message": "Subscriptions aren't available yet."})
 
 
+class CheckoutRequest(BaseModel):
+    plan: Optional[str] = "monthly"          # monthly | annual | pass
+
+
 @router.get("/api/billing/status")
 async def billing_status(user=Depends(get_current_user)):
-    return {"enabled": bool(flag_svc and flag_svc.is_enabled("billing", user["uid"])), "mode": billing_svc.mode}
+    enabled = bool(flag_svc and flag_svc.is_enabled("billing", user["uid"]))
+    plans = await run_in_threadpool(billing_svc.plans) if enabled else []
+    return {"enabled": enabled, "mode": billing_svc.mode, "plans": plans,
+            "tax_added": billing_svc.automatic_tax}
 
 
 @router.post("/api/billing/checkout-session")
-async def checkout_session(user=Depends(get_current_user)):
+async def checkout_session(req: Optional[CheckoutRequest] = None, user=Depends(get_current_user)):
     _require_flag(user["uid"])
+    plan = (req.plan if req and req.plan else "monthly").strip().lower()
     try:
-        url = await run_in_threadpool(billing_svc.create_checkout, user["uid"], user.get("email"))
+        url = await run_in_threadpool(billing_svc.create_checkout, user["uid"], user.get("email"), plan)
     except BillingError as e:
         raise _http(e)
     return {"url": url}
