@@ -102,6 +102,11 @@ class Access:
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
+    # A developer's local .env (loaded by config/main) may hold real Stripe settings;
+    # clear every billing variable so these tests only see what they set.
+    for var in ("STRIPE_PRICE_ID", "STRIPE_PRICE_MONTHLY", "STRIPE_PRICE_ANNUAL", "STRIPE_PRICE_PASS",
+                "STRIPE_PASS_DAYS", "STRIPE_AUTOMATIC_TAX", "STRIPE_TOS_CONSENT"):
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_x")
     monkeypatch.setenv("STRIPE_PRICE_ID", "price_20")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
