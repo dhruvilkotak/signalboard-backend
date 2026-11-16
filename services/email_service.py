@@ -242,3 +242,109 @@ Questions? Contact {GMAIL_USER}
         html,
         text,
     )
+
+# ── Announcements (Admin → 📣 Announce) ─────────────────────────────────────
+# Same look as the approval email. The admin writes plain text:
+#   blank line         -> new section
+#   first line of a multi-line section -> bold heading (e.g. "🎁 Free trial"),
+#                        unless it ends with , . or : (e.g. "Thanks,")
+#   "- " or "• " lines -> bullet list
+#   https://… links    -> clickable
+# Every email starts with "Hi <first name>," and ends with the paper-trading note.
+
+import html as _html
+import re as _re
+
+_URL_RE = _re.compile(r"(https?://[^\s<]+?)(?=[).,!?;:'\"]*(?:\s|$|&))")
+
+
+def _inline(text: str) -> str:
+    esc = _html.escape(text)
+    return _URL_RE.sub(r'<a href="\1" style="color:#58a6ff">\1</a>', esc)
+
+
+def render_announcement(first_name: str, subject: str, body: str) -> tuple[str, str]:
+    """(html, text) for one recipient."""
+    first_name = (first_name or "there").strip() or "there"
+    sections = [s.strip("\n") for s in _re.split(r"\n\s*\n", body.strip()) if s.strip()]
+    parts = []
+    for sec in sections:
+        lines = [l.rstrip() for l in sec.split("\n") if l.strip()]
+        is_bullet = lambda l: l.lstrip().startswith(("- ", "• ", "* "))
+        out, bullets = [], []
+
+        def flush():
+            if bullets:
+                items = "".join(f"<li>{_inline(b)}</li>" for b in bullets)
+                out.append(f'<ul style="color:#8b949e;font-size:14px;line-height:1.7;margin:0 0 8px;padding-left:20px">{items}</ul>')
+                bullets.clear()
+
+        for i, line in enumerate(lines):
+            if is_bullet(line):
+                bullets.append(line.lstrip()[2:].strip())
+                continue
+            flush()
+            if i == 0 and len(lines) > 1 and not line.rstrip().endswith((",", ".", ":")):
+                out.append(f'<p style="color:#e6edf3;font-size:14px;font-weight:600;margin:0 0 6px">{_inline(line)}</p>')
+            else:
+                out.append(f'<p style="color:#8b949e;font-size:14px;line-height:1.6;margin:0 0 8px">{_inline(line)}</p>')
+        flush()
+        parts.append(f'<div style="margin:0 0 18px">{"".join(out)}</div>')
+
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0d1117;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif">
+  <div style="max-width:560px;margin:40px auto;padding:0 16px">
+
+    <div style="text-align:center;margin-bottom:32px">
+      <h1 style="color:#e6edf3;font-size:24px;font-weight:700;margin:0;letter-spacing:-0.5px">SignalBoard</h1>
+      <p style="color:#8b949e;font-size:13px;margin:4px 0 0">AI Stock Signals</p>
+    </div>
+
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px">
+      <h2 style="color:#e6edf3;font-size:19px;font-weight:700;margin:0 0 18px">{_html.escape(subject)}</h2>
+      <p style="color:#e6edf3;font-size:14px;margin:0 0 18px">Hi {_html.escape(first_name)},</p>
+      {"".join(parts)}
+
+      <div style="text-align:center;margin:24px 0 8px">
+        <a href="{APP_URL}"
+           style="display:inline-block;background:#238636;color:#ffffff;text-decoration:none;
+                  padding:12px 32px;border-radius:6px;font-size:15px;font-weight:600;
+                  border:1px solid #2ea043">
+          Open SignalBoard →
+        </a>
+      </div>
+
+      <hr style="border:none;border-top:1px solid #30363d;margin:24px 0">
+
+      <p style="color:#6e7681;font-size:12px;text-align:center;margin:0;line-height:1.6">
+        ⚠️ Reminder: SignalBoard uses paper trading only — no real money involved.<br>
+        Signals are for educational purposes and not financial advice.
+      </p>
+    </div>
+
+    <p style="color:#6e7681;font-size:11px;text-align:center;margin:24px 0 0;line-height:1.6">
+      You received this because you have a SignalBoard account.<br>
+      Questions? Just reply, or contact <a href="mailto:{GMAIL_USER}" style="color:#58a6ff">{GMAIL_USER}</a>
+    </p>
+  </div>
+</body>
+</html>"""
+
+    text = (f"Hi {first_name},\n\n{body.strip()}\n\nOpen SignalBoard: {APP_URL}\n\n"
+            "Reminder: SignalBoard uses paper trading only — no real money involved.\n"
+            "Signals are for educational purposes and not financial advice.\n\n"
+            f"Questions? Just reply, or contact {GMAIL_USER}\n")
+    return html, text
+
+
+def email_configured() -> bool:
+    return bool(GMAIL_PASSWORD)
+
+
+def send_announcement_email(to_email: str, name: str, subject: str, body: str) -> bool:
+    """Blocking (SMTP): call from a thread."""
+    first_name = (name or "").split()[0] if (name or "").strip() else "there"
+    html, text = render_announcement(first_name, subject, body)
+    return _send_email(to_email, subject, html, text)
